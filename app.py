@@ -7,6 +7,7 @@ import textwrap
 import io
 import zipfile
 import math
+import re
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, date
 from typing import List, Optional, Dict, Any
@@ -105,6 +106,41 @@ def build_query_brief(research_brief: str, not_looking_for: str) -> str:
     return "\n\n".join(parts)
 
 
+def parse_not_terms(not_text: str) -> List[str]:
+    """
+    Split the NOT field into simple terms or phrases.
+    Supports comma, semicolon, or newline separated entries.
+    """
+    not_text = not_text.strip()
+    if not not_text:
+        return []
+    parts = re.split(r"[,\n;]+", not_text)
+    terms = [p.strip().lower() for p in parts if p.strip()]
+    return terms
+
+
+def filter_papers_by_not_terms(papers: List[Paper], not_text: str) -> (List[Paper], int):
+    """
+    Remove any paper whose title or abstract contains at least one NOT term
+    (case insensitive).
+    Returns the filtered list and the number of removed papers.
+    """
+    terms = parse_not_terms(not_text)
+    if not terms or not papers:
+        return papers, 0
+
+    filtered: List[Paper] = []
+    removed = 0
+    for p in papers:
+        text = f"{p.title} {p.abstract}".lower()
+        if any(term in text for term in terms):
+            removed += 1
+        else:
+            filtered.append(p)
+
+    return filtered, removed
+
+
 # =========================
 # Robust arXiv fetching
 # =========================
@@ -174,7 +210,6 @@ def fetch_arxiv_papers_by_date(
         if not feed.entries:
             break
 
-        batch_added = 0
         for entry in feed.entries:
             published_str = entry.get("published", "")
             if not published_str:
@@ -184,8 +219,6 @@ def fetch_arxiv_papers_by_date(
 
             if published_date < start_date:
                 return results
-            #if published_date > end_date:
-            #    continue
 
             authors = [a.name for a in entry.authors] if "authors" in entry else []
             email_domains: List[str] = []
@@ -211,9 +244,6 @@ def fetch_arxiv_papers_by_date(
                 arxiv_url=arxiv_url,
             )
             results.append(paper)
-            batch_added += 1
-
-       
 
         start_index += batch_size
         time.sleep(1.0)
@@ -668,7 +698,6 @@ def assign_heuristic_citations_free(papers: List[Paper]) -> List[Paper]:
             norm = (s - min_s) / (max_s - min_s)
         else:
             norm = 0.5
-        # Rough 10–50 range as a heuristic citation impact score
         p.predicted_citations = float(int(10 + norm * 40))
 
     return papers
@@ -745,37 +774,6 @@ These scores are heuristic impact signals and are best used for ranking within t
 
 The agent ranks papers, always showing **primary** papers first, then secondary ones. For the top N that you choose, it shows metadata, relevance signals, and links to arXiv and the PDF. In OpenAI mode it also adds plain English summaries. All artifacts and a markdown report are saved in a project folder under `~/arxiv_ai_digest_projects/project_<timestamp>`, and you can download everything as a ZIP.
 """
-
-
-# =========================
-# Progress message helper
-# =========================
-
-def progress_message(provider: str, date_option: str) -> str:
-    """
-    Return a light, slightly funny progress hint based on provider and date range.
-    """
-    if date_option == "Last 3 Days":
-        tier = "light"
-    elif date_option == "Last Week":
-        tier = "medium"
-    else:
-        tier = "heavy"
-
-    if provider == "openai":
-        if tier == "light":
-            return "Request in progress. Go check a message or two, your papers are almost ready."
-        elif tier == "medium":
-            return "Request in progress. Go reply to a couple of messages and come back to fresh papers."
-        else:
-            return "Request in progress. Go check your messages and maybe top up your coffee while the model thinks."
-    else:
-        if tier == "light":
-            return "Request in progress. Go check a message while the local model does its thing."
-        elif tier == "medium":
-            return "Request in progress. Go clear a few notifications, the free local mode is crunching embeddings."
-        else:
-            return "Request in progress. Go check your messages and stretch your legs, this is the heaviest setting in free local mode."
 
 
 # =========================
@@ -899,7 +897,6 @@ def main():
 
         run_clicked = st.button("🚀 Run Pipeline")
 
-    # Collapse pipeline description after the first click
     if run_clicked:
         st.session_state["hide_pipeline_description"] = True
 
@@ -931,7 +928,6 @@ def main():
         mode = "targeted"
         query_brief = build_query_brief(research_brief, not_looking_for)
 
-    # Track params for rerun behavior
     params = {
         "research_brief": research_brief.strip(),
         "not_looking_for": not_looking_for.strip(),
@@ -944,7 +940,6 @@ def main():
     if "last_params" not in st.session_state:
         st.session_state["last_params"] = params.copy()
 
-    # Handle parameter changes
     if params != st.session_state["last_params"] and not run_clicked:
         for key in [
             "current_papers",
@@ -970,7 +965,6 @@ def main():
     if run_clicked:
         st.session_state["last_params"] = params.copy()
 
-    # Basic OpenAI validation
     if provider == "openai":
         if not api_key or not model_name:
             if "ranked_papers" not in st.session_state:
@@ -986,7 +980,6 @@ def main():
         api_base=api_base,
     )
 
-    # Date range
     try:
         current_start, current_end = get_date_range(date_option)
     except ValueError as e:
@@ -1060,6 +1053,22 @@ def main():
         f"Fetched {len(current_papers)} cs.AI, cs.LG, and cs.HC papers in this date range "
         "(before any candidate selection)."
     )
+
+    # Apply NOT filter provider-agnostically
+    if not_text:
+        current_papers, removed_count = filter_papers_by_not_terms(current_papers, not_text)
+        st.session_state["current_papers"] = current_papers
+        if removed_count > 0:
+            st.info(
+                f"Excluded {removed_count} papers whose title or abstract contained terms from your NOT filter."
+            )
+
+    if not current_papers:
+        st.warning(
+            "All fetched papers were excluded by your NOT filter. "
+            "Try relaxing the NOT criteria or choosing a different date range."
+        )
+        return
 
     save_json(
         os.path.join(project_folder, "current_papers_all.json"),
@@ -1191,7 +1200,7 @@ def main():
                         used_label = f"PRIMARY + top {len(topups)} SECONDARY to reach about {MIN_FOR_PREDICTION}"
                         st.info(
                             f"{len(primary_papers)} papers classified as PRIMARY. "
-                            f"Added {len(topups)} top SECONDARY papers for citation impact scoring."   
+                            f"Added {len(topups)} top SECONDARY papers for citation impact scoring."
                         )
                     else:
                         used_label = (
