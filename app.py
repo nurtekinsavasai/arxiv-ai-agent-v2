@@ -73,6 +73,7 @@ class Paper:
     semantic_reason: Optional[str] = None
     focus_label: Optional[str] = None
     llm_relevance_score: Optional[float] = None
+    venue: Optional[str] = None
 
 
 # =========================
@@ -114,6 +115,7 @@ def build_query_brief(research_brief: str, not_looking_for: str) -> str:
     return "\n\n".join(parts)
 
 
+
 def parse_not_terms(not_text: str) -> List[str]:
     """
     Split the NOT field into simple terms or phrases.
@@ -147,6 +149,83 @@ def filter_papers_by_not_terms(papers: List[Paper], not_text: str) -> (List[Pape
             filtered.append(p)
 
     return filtered, removed
+
+def filter_papers_by_venue(
+    papers: List[Paper],
+    filter_type: str,
+    conference_choice: Optional[str]
+) -> List[Paper]:
+
+    if filter_type == "None":
+        return papers
+
+    results = []
+    for p in papers:
+        venue = (p.venue or "").lower()
+
+        # Generic conference
+        if filter_type == "Conference":
+            if any(conf.lower() == venue for conf in CONFERENCE_KEYWORDS):
+                results.append(p)
+
+        # Generic journal
+        elif filter_type == "Journal":
+            if any(j.lower() == venue for j in JOURNAL_KEYWORDS):
+                results.append(p)
+
+        # Specific conference like EMNLP
+        elif filter_type == "Specific Conference" and conference_choice:
+            if venue == conference_choice.lower():
+                results.append(p)
+
+    return results
+
+# =========================
+# Venue extraction helpers
+# =========================
+
+CONFERENCE_KEYWORDS = {
+    "EMNLP", "ACL", "NAACL", "EACL",
+    "NeurIPS", "NIPS",
+    "ICLR",
+    "ICML",
+    "CVPR",
+    "ECCV",
+    "ICASSP",
+    "AAAI",
+    "AISTATS",
+}
+
+JOURNAL_KEYWORDS = {
+    "IEEE Transactions",
+    "ACM Transactions",
+    "Transactions on",
+    "Nature",
+    "Science",
+    "Elsevier",
+    "Springer",
+    "Journal",
+}
+
+
+def extract_venue(comment: str) -> Optional[str]:
+    """Extract conference or journal info from arXiv comments."""
+    if not comment:
+        return None
+
+    c = comment.lower()
+
+    # Look for conference name
+    for conf in CONFERENCE_KEYWORDS:
+        if conf.lower() in c:
+            return conf
+
+    # Look for journal
+    for j in JOURNAL_KEYWORDS:
+        if j.lower() in c:
+            return j
+
+    return None
 
 
 # =========================
@@ -246,6 +325,10 @@ def fetch_arxiv_papers_by_date(
                 if getattr(link, "title", "") == "pdf":
                     pdf_url = link.href
 
+            # Extract arXiv comment (contains venue info)
+            comment = entry.get("arxiv_comment", "") or entry.get("comment", "")
+            venue = extract_venue(comment)
+
             paper = Paper(
                 arxiv_id=arxiv_id,
                 title=entry.title.strip().replace("\n", " "),
@@ -255,6 +338,7 @@ def fetch_arxiv_papers_by_date(
                 submitted_date=published_dt,
                 pdf_url=pdf_url,
                 arxiv_url=arxiv_url,
+                venue=venue,
             )
             results.append(paper)
 
@@ -924,6 +1008,22 @@ def main():
             height=120,
         )
 
+        st.markdown("### 🏷 Venue Filter")
+
+        venue_filter_type = st.selectbox(
+            "Filter by venue (optional)",
+            ["None", "Conference", "Journal", "Specific Conference"],
+            index=0
+        )
+
+        conference_choice = None
+        if venue_filter_type == "Specific Conference":
+            conference_choice = st.selectbox(
+                "Choose conference",
+                sorted(list(CONFERENCE_KEYWORDS))
+            )
+
+
         date_option = st.selectbox("Date Range", ["Last 3 Days", "Last Week", "Last Month"])
 
         st.markdown("### ⭐ Top N Highlight")
@@ -1074,6 +1174,8 @@ def main():
         "top_n": top_n,
         "model_name": model_name,
         "provider": provider,
+        "venue_filter_type": venue_filter_type,       # NEW
+        "conference_choice": conference_choice,       # NEW
     }
 
     if "last_params" not in st.session_state:
@@ -1206,18 +1308,43 @@ def main():
     # Apply NOT filter provider-agnostically
     if not_text:
         current_papers, removed_count = filter_papers_by_not_terms(current_papers, not_text)
+        
         st.session_state["current_papers"] = current_papers
         if removed_count > 0:
             st.info(
                 f"Excluded {removed_count} papers whose title or abstract contained terms from your NOT filter."
-            )
+           )
+    # Venue filter (new)
+    venue_filter_type = params["venue_filter_type"]
+    conference_choice = params["conference_choice"]
 
+    before_count = len(current_papers)
+    current_papers = filter_papers_by_venue(
+    current_papers,
+    filter_type=venue_filter_type,
+    conference_choice=conference_choice,
+)
+    after_count = len(current_papers)
+
+    if venue_filter_type != "None":
+        st.info(
+            f"Venue filter `{venue_filter_type}` applied. "
+            f"Remaining papers: {after_count} (filtered out {before_count - after_count})"
+        )
+
+    # Save filtered version into state
+    st.session_state["current_papers"] = current_papers
+
+    # Check if empty result
     if not current_papers:
         st.warning(
-            "All fetched papers were excluded by your NOT filter. "
-            "Try relaxing the NOT criteria or choosing a different date range."
+            "All fetched papers were excluded by your filters (NOT or venue). "
+            "Try relaxing your criteria or choosing a different date range."
         )
         return
+            
+
+
 
     save_json(
         os.path.join(project_folder, "current_papers_all.json"),
