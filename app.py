@@ -30,12 +30,19 @@ try:
 except ImportError:
     SentenceTransformer = None  # type: ignore
 
+# Optional Google Gemini client
+try:
+    from google import genai  # type: ignore
+except ImportError:
+    genai = None  # type: ignore
+
 # =========================
 # Constants
 # =========================
 
 MIN_FOR_PREDICTION = 20
 OPENAI_EMBEDDING_MODEL_NAME = "text-embedding-3-large"
+GEMINI_EMBEDDING_MODEL_NAME = "text-embedding-004"
 
 
 # =========================
@@ -47,6 +54,7 @@ class LLMConfig:
     api_key: str
     model: str
     api_base: str
+    provider: str = "openai"  # "openai", "gemini", or "free_local"
 
 
 @dataclass
@@ -263,7 +271,7 @@ def fetch_arxiv_papers_by_date(
 
 
 # =========================
-# Generic LLM call + JSON helper (OpenAI path)
+# Generic LLM call + JSON helper (OpenAI / Gemini)
 # =========================
 
 def call_llm(prompt: str, llm_config: LLMConfig, label: str = "") -> str:
@@ -272,23 +280,43 @@ def call_llm(prompt: str, llm_config: LLMConfig, label: str = "") -> str:
     st.session_state["last_prompts"][label or "default"] = prompt
 
     try:
-        client = OpenAI(
-            api_key=llm_config.api_key,
-            base_url=llm_config.api_base,
-        )
-        messages = [
-            {"role": "system", "content": "You are a helpful AI assistant."},
-            {"role": "user", "content": prompt},
-        ]
-        kwargs: Dict[str, Any] = {
-            "model": llm_config.model,
-            "messages": messages,
-        }
-        if not llm_config.model.startswith("o1"):
-            kwargs["temperature"] = 0.2
+        if llm_config.provider == "openai":
+            client = OpenAI(
+                api_key=llm_config.api_key,
+                base_url=llm_config.api_base,
+            )
+            messages = [
+                {"role": "system", "content": "You are a helpful AI assistant."},
+                {"role": "user", "content": prompt},
+            ]
+            kwargs: Dict[str, Any] = {
+                "model": llm_config.model,
+                "messages": messages,
+            }
+            if not llm_config.model.startswith("o1"):
+                kwargs["temperature"] = 0.2
 
-        resp = client.chat.completions.create(**kwargs)
-        return resp.choices[0].message.content
+            resp = client.chat.completions.create(**kwargs)
+            return resp.choices[0].message.content
+
+        elif llm_config.provider == "gemini":
+            if genai is None:
+                st.error(
+                    "Gemini provider selected but the google-genai package is not installed.\n\n"
+                    "Run `pip install google-genai` in your environment."
+                )
+                st.stop()
+
+            client = genai.Client(api_key=llm_config.api_key)
+            response = client.models.generate_content(
+                model=llm_config.model,
+                contents=prompt,
+            )
+            # google-genai responses have a .text convenience property
+            return response.text
+
+        else:
+            raise ValueError(f"Unknown provider: {llm_config.provider}")
 
     except NotFoundError:
         st.error(
@@ -371,6 +399,48 @@ def embed_texts_openai(
     return all_embeddings
 
 
+def embed_texts_gemini(
+    texts: List[str],
+    llm_config: LLMConfig,
+    embedding_model: str,
+) -> List[List[float]]:
+    if not texts:
+        return []
+    if genai is None:
+        st.error(
+            "Gemini provider selected but the google-genai package is not installed.\n\n"
+            "Run `pip install google-genai` in your environment."
+        )
+        st.stop()
+
+    try:
+        client = genai.Client(api_key=llm_config.api_key)
+    except Exception as e:
+        st.error(f"Failed to initialize Gemini client: {e}")
+        st.stop()
+
+    all_embeddings: List[List[float]] = []
+    batch_size = 100  # Gemini API limit is 100 per request
+
+    for start in range(0, len(texts), batch_size):
+        batch = texts[start:start + batch_size]
+        try:
+            # embed_content can take multiple contents
+            response = client.models.embed_content(
+                model=embedding_model,
+                contents=batch,
+            )
+        except Exception as e:
+            st.error(f"Gemini embedding API call failed: {e}")
+            raise
+
+        # response.embeddings is a list of embeddings with .values
+        for emb in getattr(response, "embeddings", []):
+            all_embeddings.append(list(emb.values))
+
+    return all_embeddings
+
+
 @st.cache_resource(show_spinner=False)
 def get_local_embed_model() -> SentenceTransformer:
     if SentenceTransformer is None:
@@ -418,16 +488,30 @@ def select_embedding_candidates(
 ) -> List[Paper]:
     """
     From all fetched papers, pick the top-K most semantically similar to the brief.
-    provider: "openai" or "free_local"
+    provider: "openai", "gemini", or "free_local"
     """
     if not papers:
         return []
 
+    if provider in ("openai", "gemini") and llm_config is None:
+        st.error(
+            f"Internal error: llm_config is required for provider '{provider}'. "
+            "Falling back to all papers."
+        )
+        return papers
+
+    # 1) Embed the query
     try:
         if provider == "openai":
             query_vec = embed_texts_openai(
                 [query_brief],
-                llm_config=llm_config,
+                llm_config=llm_config,  # type: ignore
+                embedding_model=embedding_model,
+            )[0]
+        elif provider == "gemini":
+            query_vec = embed_texts_gemini(
+                [query_brief],
+                llm_config=llm_config,  # type: ignore
                 embedding_model=embedding_model,
             )[0]
         else:
@@ -435,12 +519,19 @@ def select_embedding_candidates(
     except Exception:
         return papers
 
+    # 2) Embed all papers
     texts = [p.title + "\n\n" + p.abstract for p in papers]
     try:
         if provider == "openai":
             paper_vecs = embed_texts_openai(
                 texts,
-                llm_config=llm_config,
+                llm_config=llm_config,  # type: ignore
+                embedding_model=embedding_model,
+            )
+        elif provider == "gemini":
+            paper_vecs = embed_texts_gemini(
+                texts,
+                llm_config=llm_config,  # type: ignore
                 embedding_model=embedding_model,
             )
         else:
@@ -461,7 +552,7 @@ def select_embedding_candidates(
 
 
 # =========================
-# LLM relevance classification (OpenAI) + heuristic classification (free)
+# LLM relevance classification (OpenAI / Gemini) + heuristic classification (free)
 # =========================
 
 def classify_papers_with_llm(
@@ -595,7 +686,7 @@ def heuristic_classify_papers_free(candidates: List[Paper]) -> List[Paper]:
 
 
 # =========================
-# Direct citation impact scoring (OpenAI) + heuristic scores (free)
+# Direct citation impact scoring (OpenAI / Gemini) + heuristic scores (free)
 # =========================
 
 def build_direct_prediction_prompt(target_papers: List[Paper]) -> str:
@@ -709,7 +800,7 @@ def assign_heuristic_citations_free(papers: List[Paper]) -> List[Paper]:
 
 
 # =========================
-# Plain English summary helper (OpenAI only)
+# Plain English summary helper (LLM modes)
 # =========================
 
 def summarize_paper_plain_english(paper: Paper, llm_config: LLMConfig) -> str:
@@ -757,8 +848,8 @@ It fetches up to about 5000 papers from arxiv.org in the Artificial Intelligence
 
 #### The agent judges how relevant each paper is
 
-- In **OpenAI mode**, an LLM reads each candidate and labels it as primary, secondary, or off topic.  
-- In **free local mode**, a simple heuristic uses the embedding similarity to mark the most relevant papers as primary and the rest as secondary.
+- In **LLM API mode** (OpenAI or Gemini), a model reads each candidate and labels it as primary, secondary, or off topic.  
+- In **free local mode**, the agent uses a simple heuristic based on the embedding similarity to mark the most relevant papers as primary and the rest as secondary.
 
 #### The agent builds a citation impact set
 
@@ -770,14 +861,14 @@ The agent builds a set of papers to send to the citation impact step:
 
 #### The agent computes 1-year citation impact scores
 
-- In **OpenAI mode**, an LLM estimates a 1-year citation impact score for each paper and provides short explanations.  
+- In **LLM API mode** (OpenAI or Gemini), a model estimates a 1-year citation impact score for each paper and provides short explanations.  
 - In **free local mode**, the agent derives a citation impact score from the relevance signals and uses that to rank papers.
 
 These scores are heuristic impact signals and are best used for ranking within this batch, not as ground truth.
 
 #### The agent ranks, summarizes, and saves results
 
-The agent ranks papers, always showing **primary** papers first, then secondary ones. For the top N that you choose, it shows metadata, relevance signals, and links to arXiv and the PDF. In OpenAI mode it also adds plain English summaries. All artifacts and a markdown report are saved in a project folder under `~/arxiv_ai_digest_projects/project_<timestamp>`, and you can download everything as a ZIP.
+The agent ranks papers, always showing **primary** papers first, then secondary ones. For the top N that you choose, it shows metadata, relevance signals, and links to arXiv and the PDF. In LLM API mode it also adds plain English summaries. All artifacts and a markdown report are saved in a project folder under `~/arxiv_ai_digest_projects/project_<timestamp>`, and you can download everything as a ZIP.
 """
 
 
@@ -796,7 +887,8 @@ def main():
     top_col1, top_col2 = st.columns([3, 1])
     with top_col1:
         st.write(
-            "A research assistant that finds, ranks, and explains recent AI papers on arxiv.org."
+            """Too many important papers get lost in the noise. Most researchers and practitioners cannot reliably scan what is new recently in their area, find truly promising work, and trust that they did not miss something big."""
+            " This agent helps with this problem by finding, ranking, and explaining recent AI papers on arxiv.org."
         )
     with top_col2:
         st.link_button(
@@ -844,19 +936,27 @@ def main():
 
         provider_label_free = "Free local model (no API key)"
         provider_label_openai = "OpenAI (API key required)"
+        provider_label_gemini = "Gemini (API key required)"
 
         provider_choice = st.radio(
             "Choose provider",
-            [provider_label_free, provider_label_openai],
+            [provider_label_free, provider_label_openai, provider_label_gemini],
             index=0,
         )
 
         if provider_choice == provider_label_openai:
             provider = "openai"
+        elif provider_choice == provider_label_gemini:
+            provider = "gemini"
         else:
             provider = "free_local"
 
-        api_base = "https://api.openai.com/v1"
+        if provider == "openai":
+            api_base = "https://api.openai.com/v1"
+        elif provider == "gemini":
+            api_base = "https://generativelanguage.googleapis.com"
+        else:
+            api_base = ""
 
         if provider == "openai":
             st.markdown("### 🤖 OpenAI Settings")
@@ -891,6 +991,40 @@ def main():
 
             embedding_model_name = OPENAI_EMBEDDING_MODEL_NAME
             st.caption(f"Embeddings (OpenAI): `{embedding_model_name}`")
+
+        elif provider == "gemini":
+            st.markdown("### 🌌 Gemini Settings")
+            api_key = st.text_input("Gemini API Key", type="password")
+            st.caption(
+                "Use an API key from Google AI Studio or Vertex AI for the Gemini API. "
+                "The key is kept only in memory for this session and is never written to disk."
+            )
+
+            # Updated Gemini models list including Gemini 3 Preview
+            gemini_models = [
+                "gemini-3-pro-preview",
+                "gemini-2.5-flash",
+                "gemini-2.5-pro",
+                "gemini-2.0-flash-exp",
+                "Custom",
+            ]
+            gemini_choice = st.selectbox(
+                "Gemini Chat model (for classification & citation impact scoring)",
+                gemini_models,
+                index=0,
+            )
+            if gemini_choice == "Custom":
+                model_name = st.text_input(
+                    "Custom Gemini model name",
+                    value="gemini-3-pro-preview",
+                    help="Use the model identifier shown in Google AI Studio, for example `gemini-3-pro-preview`."
+                )
+            else:
+                model_name = gemini_choice
+
+            embedding_model_name = GEMINI_EMBEDDING_MODEL_NAME
+            st.caption(f"Embeddings (Gemini): `{embedding_model_name}`")
+
         else:
             api_key = ""
             model_name = "heuristic-free-local"
@@ -975,6 +1109,11 @@ def main():
             if "ranked_papers" not in st.session_state:
                 st.warning("Your OpenAI API key and chat model name are required to run in OpenAI mode.")
                 return
+    elif provider == "gemini":
+        if not api_key or not model_name:
+            if "ranked_papers" not in st.session_state:
+                st.warning("Your Gemini API key and model name are required to run in Gemini mode.")
+                return
     else:
         api_key = api_key or ""
         model_name = model_name or "heuristic-free-local"
@@ -983,6 +1122,7 @@ def main():
         api_key=api_key or "",
         model=model_name,
         api_base=api_base,
+        provider=provider,
     )
 
     try:
@@ -1030,7 +1170,11 @@ def main():
         "llm_model": model_name,
         "llm_api_base": api_base,
         "embedding_model": embedding_model_name,
-        "llm_provider": "OpenAI" if provider == "openai" else "FreeLocalHeuristic",
+        "llm_provider": (
+            "OpenAI" if provider == "openai"
+            else "Gemini" if provider == "gemini"
+            else "FreeLocalHeuristic"
+        ),
         "top_n": top_n,
         "min_for_prediction": MIN_FOR_PREDICTION,
     }
@@ -1104,8 +1248,8 @@ def main():
                 candidates = select_embedding_candidates(
                     current_papers,
                     query_brief=query_brief,
-                    llm_config=llm_config if provider == "openai" else None,
-                    embedding_model=OPENAI_EMBEDDING_MODEL_NAME if provider == "openai" else embedding_model_name,
+                    llm_config=llm_config if provider in ("openai", "gemini") else None,
+                    embedding_model=embedding_model_name,
                     provider=provider,
                     max_candidates=150,
                 )
@@ -1138,9 +1282,10 @@ def main():
                 if p.semantic_reason is None:
                     p.semantic_reason = "Global mode: no topical filtering; treated as primary."
     else:
-        if provider == "openai":
+        if provider in ("openai", "gemini"):
+            provider_label = "OpenAI" if provider == "openai" else "Gemini"
             if run_clicked or any(p.focus_label is None for p in candidates):
-                with st.spinner("Classifying candidates as PRIMARY, SECONDARY, or OFF TOPIC (OpenAI)..."):
+                with st.spinner(f"Classifying candidates as PRIMARY, SECONDARY, or OFF TOPIC ({provider_label})..."):
                     candidates = classify_papers_with_llm(
                         candidates,
                         query_brief=query_brief,
@@ -1292,6 +1437,14 @@ For each selected paper, the agent sends the title, authors, and abstract to an 
 
 These citation impact scores are heuristic and are best used for ranking and prioritization within this batch of papers, not as ground truth. They may reflect existing academic biases.
         """)
+    elif provider == "gemini":
+        st.markdown("""
+**How this step works (Gemini mode)**
+
+For each selected paper, the agent sends the title, authors, and abstract to a Gemini model (for example `gemini-3-pro-preview`) and asks it to assign a 1-year citation impact score. The model bases this score on signals such as how trendy the topic is, how novel and substantial the abstract sounds, how broad the potential audience is, and whether the work appears to come from strong labs or well known authors.
+
+These citation impact scores are heuristic and are best used for ranking within this batch of papers, not as ground truth. They may reflect existing academic and data biases.
+        """)
     else:
         st.markdown("""
 **How this step works (free local mode)**
@@ -1302,8 +1455,8 @@ These scores are heuristic and should be used as a guide for exploration rather 
         """)
 
     if run_clicked or "ranked_papers" not in st.session_state:
-        if provider == "openai":
-            with st.spinner("Calling OpenAI to compute citation impact scores for selected papers..."):
+        if provider in ("openai", "gemini"):
+            with st.spinner("Calling LLM API to compute citation impact scores for selected papers..."):
                 papers_with_pred = predict_citations_direct(
                     target_papers=selected_papers,
                     llm_config=llm_config,
@@ -1384,19 +1537,19 @@ These scores are heuristic and should be used as a guide for exploration rather 
 
     if not df.empty:
         st.dataframe(
-        df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "arXiv": st.column_config.LinkColumn(
-                label="arXiv",
-                help="Open arXiv page",
-                validate="^https?://.*",
-                max_chars=100,
-                display_text="arXiv link"
-            )
-        }
-    )
+            df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "arXiv": st.column_config.LinkColumn(
+                    label="arXiv",
+                    help="Open arXiv page",
+                    validate="^https?://.*",
+                    max_chars=100,
+                    display_text="arXiv link"
+                )
+            }
+        )
 
     # 8. Top N highlighted
     top_n_effective = min(top_n, len(ranked_papers))
@@ -1415,7 +1568,7 @@ These scores are heuristic and should be used as a guide for exploration rather 
         st.write(f"**Authors:** {', '.join(p.authors) if p.authors else 'Unknown'}")
         st.write(f"[arXiv link]({p.arxiv_url}) | [PDF link]({p.pdf_url})")
 
-        if provider == "openai":
+        if provider in ("openai", "gemini"):
             paper_key = p.arxiv_id or p.title
             if paper_key in plain_summaries:
                 summary = plain_summaries[paper_key]
@@ -1433,8 +1586,8 @@ These scores are heuristic and should be used as a guide for exploration rather 
                 for ex in p.prediction_explanations[:3]:
                     st.write(f"- {ex}")
         else:
-            st.markdown("**Plain English summary:** only available in OpenAI option")
-            st.markdown("**Why this citation impact score (3 factors):** only available in OpenAI option")
+            st.markdown("**Plain English summary:** only available in OpenAI / Gemini options")
+            st.markdown("**Why this citation impact score (3 factors):** only available in OpenAI / Gemini options")
 
         if p.focus_label:
             st.write(f"**Focus label:** {p.focus_label}")
@@ -1464,7 +1617,7 @@ These scores are heuristic and should be used as a guide for exploration rather 
         "",
         f"Mode: {mode}",
         f"Date range: {current_start} to {current_end}",
-        f"Provider: {'OpenAI' if provider == 'openai' else 'Free local heuristic'}",
+        f"Provider: {'OpenAI' if provider == 'openai' else 'Gemini' if provider == 'gemini' else 'Free local heuristic'}",
         f"Chat model: {model_name}",
         f"Embedding model: {embedding_model_name}",
         "",
@@ -1483,7 +1636,7 @@ These scores are heuristic and should be used as a guide for exploration rather 
             report_lines.append(f"- Embedding similarity: {p.semantic_relevance:.3f}")
         if p.semantic_reason:
             report_lines.append(f"- Relevance explanation: {p.semantic_reason}")
-        if provider == "openai":
+        if provider in ("openai", "gemini"):
             report_lines.append("- Citation impact explanations:")
             if p.prediction_explanations:
                 for ex in p.prediction_explanations[:3]:

@@ -3,4 +3,6 @@ requests>=2.31.0
 feedparser>=6.0.10
 openai>=1.55.0
 sentence-transformers>=3.0.0
+pandas>=2.0.0
+google-genai>=0.3.0
 
