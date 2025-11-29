@@ -73,6 +73,7 @@ class Paper:
     semantic_reason: Optional[str] = None
     focus_label: Optional[str] = None
     llm_relevance_score: Optional[float] = None
+    venue: Optional[str] = None
 
 
 # =========================
@@ -114,6 +115,7 @@ def build_query_brief(research_brief: str, not_looking_for: str) -> str:
     return "\n\n".join(parts)
 
 
+
 def parse_not_terms(not_text: str) -> List[str]:
     """
     Split the NOT field into simple terms or phrases.
@@ -147,6 +149,84 @@ def filter_papers_by_not_terms(papers: List[Paper], not_text: str) -> (List[Pape
             filtered.append(p)
 
     return filtered, removed
+
+def filter_papers_by_venue(
+    papers: List[Paper],
+    venue_filter_type: str,
+    selected_category: Optional[str],
+    selected_venues: List[str]
+):
+    if venue_filter_type == "None":
+        return papers
+
+    filtered = []
+    for p in papers:
+        venue = (p.venue or "").lower()
+
+        # All conferences
+        if venue_filter_type == "All Conferences":
+            if any(conf.lower() in venue for conf in CONFERENCE_KEYWORDS):
+                filtered.append(p)
+
+        # All journals
+        elif venue_filter_type == "All Journals":
+            if any(j.lower() in venue for j in JOURNAL_KEYWORDS):
+                filtered.append(p)
+
+        # Specific venue(s) in a chosen category
+        elif venue_filter_type == "Specific Venue":
+            if selected_category == "Conference":
+                if selected_venues and any(sel.lower() in venue for sel in selected_venues):
+                    filtered.append(p)
+            elif selected_category == "Journal":
+                if selected_venues and any(sel.lower() in venue for sel in selected_venues):
+                    filtered.append(p)
+
+    return filtered
+
+
+
+
+
+# =========================
+# Venue extraction helpers
+# =========================
+
+# Updated list (use NeurIPS only)
+CONFERENCE_KEYWORDS = [
+    "EMNLP", "ACL", "NAACL", "EACL",
+    "NeurIPS", "ICLR", "ICML",
+    "CVPR", "ECCV",
+    "ICASSP", "AAAI", "AISTATS",
+]
+
+JOURNAL_KEYWORDS = [
+    "IEEE Transactions", "ACM Transactions", "Transactions on",
+    "Nature", "Science", "Elsevier", "Springer", "Journal",
+]
+
+NEGATIVE_VENUE_SIGNALS = ["submitted to", "under review", "preprint"]
+
+
+def extract_venue(comment: str) -> Optional[str]:
+    """Extract conference or journal info from arXiv comments, ignoring submissions."""
+    if not comment:
+        return None
+
+    c = comment.lower()
+
+    # ❌ Ignore papers that are only 'submitted', 'under review', or 'preprint'
+    if any(sig in c for sig in NEGATIVE_VENUE_SIGNALS):
+        return None
+
+    # Combine and sort for deterministic matching
+    all_venues = sorted(CONFERENCE_KEYWORDS + JOURNAL_KEYWORDS)
+
+    for venue in all_venues:
+        if venue.lower() in c:
+            return venue
+
+    return None
 
 
 # =========================
@@ -246,6 +326,10 @@ def fetch_arxiv_papers_by_date(
                 if getattr(link, "title", "") == "pdf":
                     pdf_url = link.href
 
+            # Extract arXiv comment (contains venue info)
+            comment = entry.get("arxiv_comment", "") or entry.get("comment", "")
+            venue = extract_venue(comment)
+
             paper = Paper(
                 arxiv_id=arxiv_id,
                 title=entry.title.strip().replace("\n", " "),
@@ -255,6 +339,7 @@ def fetch_arxiv_papers_by_date(
                 submitted_date=published_dt,
                 pdf_url=pdf_url,
                 arxiv_url=arxiv_url,
+                venue=venue,
             )
             results.append(paper)
 
@@ -924,6 +1009,44 @@ def main():
             height=120,
         )
 
+        # --- Venue Filtering UI ---
+
+
+        st.markdown("### 🏷 Venue Filter")
+
+        venue_filter_type = st.selectbox(
+            "Filter by venue",
+            ["None", "All Conferences", "All Journals", "Specific Venue"],
+            index=0
+        )
+
+        selected_category = None
+        selected_venues = []
+
+        if venue_filter_type == "Specific Venue":
+
+            # First dropdown: choose category
+            selected_category = st.selectbox(
+                "Select type:",
+                ["Conference", "Journal"]
+            )
+
+            # Depending on category show MULTISELECT
+            if selected_category == "Conference":
+                options = sorted(CONFERENCE_KEYWORDS)
+            else:
+                options = sorted(JOURNAL_KEYWORDS)
+
+            selected_venues = st.multiselect(
+                f"Select {selected_category.lower()}(s):",
+                options=options
+            )
+
+
+
+
+
+
         date_option = st.selectbox("Date Range", ["Last 3 Days", "Last Week", "Last Month"])
 
         st.markdown("### ⭐ Top N Highlight")
@@ -1074,6 +1197,9 @@ def main():
         "top_n": top_n,
         "model_name": model_name,
         "provider": provider,
+        "venue_filter_type": venue_filter_type,
+        "selected_category": selected_category,
+        "selected_venues": selected_venues,
     }
 
     if "last_params" not in st.session_state:
@@ -1204,20 +1330,42 @@ def main():
     )
 
     # Apply NOT filter provider-agnostically
+    # NOT filter
     if not_text:
         current_papers, removed_count = filter_papers_by_not_terms(current_papers, not_text)
-        st.session_state["current_papers"] = current_papers
-        if removed_count > 0:
-            st.info(
-                f"Excluded {removed_count} papers whose title or abstract contained terms from your NOT filter."
-            )
+        st.info(f"Excluded {removed_count} papers whose title or abstract contained NOT terms.")
+
+
+
+    venue_filter_type = params["venue_filter_type"]
+    selected_category = params.get("selected_category")
+    selected_venues = params.get("selected_venues", [])
+
+    before_count = len(current_papers)
+    current_papers = filter_papers_by_venue(
+        current_papers,
+        venue_filter_type,
+        selected_category,
+        selected_venues
+    )
+    after_count = len(current_papers)
+
+    if venue_filter_type != "None":
+        st.info(
+            f"Venue filter `{venue_filter_type}` applied → "
+            f"{selected_category or ''}: {', '.join(selected_venues) if selected_venues else 'None'}\n"
+            f"Remaining: {after_count} (Filtered out {before_count - after_count})"
+        )
+
+
+
+    st.session_state["current_papers"] = current_papers
 
     if not current_papers:
-        st.warning(
-            "All fetched papers were excluded by your NOT filter. "
-            "Try relaxing the NOT criteria or choosing a different date range."
-        )
+        st.warning("All papers were filtered out. Relax filters or pick another date range.")
         return
+
+
 
     save_json(
         os.path.join(project_folder, "current_papers_all.json"),
@@ -1348,7 +1496,7 @@ def main():
                     total = len(used_papers)
                     if len(secondary_papers) >= needed:
                         used_label = f"PRIMARY + top {len(topups)} SECONDARY to reach about {MIN_FOR_PREDICTION}"
-                        st.info(
+                        (
                             f"{len(primary_papers)} papers classified as PRIMARY. "
                             f"Added {len(topups)} top SECONDARY papers for citation impact scoring."
                         )
@@ -1528,8 +1676,10 @@ These scores are heuristic and should be used as a guide for exploration rather 
                 "Focus": focus_display,
                 "Relevance score": round(llm_rel, 2),
                 "Embedding similarity": round(emb_rel, 3),
+                "Venue":p.venue or "N/A",
                 "Title": p.title,
                 "arXiv": p.arxiv_url,
+
             }
         )
 
@@ -1566,6 +1716,7 @@ These scores are heuristic and should be used as a guide for exploration rather 
         st.markdown(f"### #{rank}: {p.title}")
         st.write(f"**Citation impact score (1 year):** {int(p.predicted_citations or 0)}")
         st.write(f"**Authors:** {', '.join(p.authors) if p.authors else 'Unknown'}")
+        st.write(f"**Venue:**{p.venue or 'N/'}")
         st.write(f"[arXiv link]({p.arxiv_url}) | [PDF link]({p.pdf_url})")
 
         if provider in ("openai", "gemini"):
