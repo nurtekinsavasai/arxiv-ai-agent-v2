@@ -201,9 +201,19 @@ CONFERENCE_KEYWORDS = [
 ]
 
 JOURNAL_KEYWORDS = [
-    "IEEE Transactions", "ACM Transactions", "Transactions on",
-    "Nature", "Science", "Elsevier", "Springer", "Journal",
+    "Nature",
+    "Science",
+    "JMLR",  # Journal of Machine Learning Research
+    "Journal of Machine Learning Research",
+    "TPAMI",  # IEEE Transactions on Pattern Analysis and Machine Intelligence
+    "IEEE Transactions on Pattern Analysis",
+    "Artificial Intelligence Journal",
+    "IJCV",  # International Journal of Computer Vision
+    "International Journal of Computer Vision",
+    "Nature Machine Intelligence",
+    "Nature Communications",
 ]
+
 
 NEGATIVE_VENUE_SIGNALS = ["submitted to", "under review", "preprint"]
 
@@ -928,7 +938,7 @@ It fetches up to about 5000 papers from arxiv.org in the Artificial Intelligence
 
 #### The agent picks candidate papers
 
-- In **targeted mode**, the agent uses embeddings to measure how close each paper's title and abstract are to your brief in meaning and keeps the top 150 as candidates.  
+- In **targeted mode**, the agent uses embeddings to measure how close each paper's title and abstract are toyour brief in meaning and keeps the top 150 as candidates.  
 - In **global mode**, it simply takes the most recent 150 `cs.AI`, `cs.LG`, and `cs.HC` papers as candidates.
 
 #### The agent judges how relevant each paper is
@@ -1331,9 +1341,20 @@ def main():
 
     # Apply NOT filter provider-agnostically
     # NOT filter
+    # if not_text:
+    #     current_papers, removed_count = filter_papers_by_not_terms(current_papers, not_text)
+    #     st.info(f"Excluded {removed_count} papers whose title or abstract contained NOT terms.")
+    # ONLY apply NOT filter here — venue filter will be applied LATER
     if not_text:
         current_papers, removed_count = filter_papers_by_not_terms(current_papers, not_text)
         st.info(f"Excluded {removed_count} papers whose title or abstract contained NOT terms.")
+
+# DO NOT apply venue filter here.
+# Save the venue settings for later use after embeddings.
+        st.session_state["venue_filter_type"] = venue_filter_type
+        st.session_state["selected_category"] = selected_category
+        st.session_state["selected_venues"] = selected_venues
+
 
 
 
@@ -1409,6 +1430,33 @@ def main():
             candidates = st.session_state["candidates"]
 
         st.success(f"{len(candidates)} top candidates selected by embedding similarity for further filtering.")
+        # Apply venue filtering AFTER embeddings ✨
+    venue_filter_type = st.session_state.get("venue_filter_type", "None")
+    selected_category = st.session_state.get("selected_category", None)
+    selected_venues = st.session_state.get("selected_venues", [])
+
+    before_v = len(candidates)
+    candidates = filter_papers_by_venue(
+        candidates,
+        venue_filter_type,
+        selected_category,
+        selected_venues
+    )
+    after_v = len(candidates)
+
+    if venue_filter_type != "None":
+        display_sel = ", ".join(selected_venues) if selected_venues else ""
+        if display_sel:
+            name_string = f" → {display_sel}"
+        else:
+            name_string = ""
+
+        st.info(
+            f"Venue filter `{venue_filter_type}` applied{name_string}. "
+            f"Remaining: {after_v} (Filtered out {before_v - after_v})"
+        )
+
+
 
     save_json(
         os.path.join(project_folder, "candidates_embedding_selected.json"),
@@ -1716,7 +1764,7 @@ These scores are heuristic and should be used as a guide for exploration rather 
         st.markdown(f"### #{rank}: {p.title}")
         st.write(f"**Citation impact score (1 year):** {int(p.predicted_citations or 0)}")
         st.write(f"**Authors:** {', '.join(p.authors) if p.authors else 'Unknown'}")
-        st.write(f"**Venue:**{p.venue or 'N/'}")
+        st.markdown(f"**Venue:**{p.venue or 'N/A'}")
         st.write(f"[arXiv link]({p.arxiv_url}) | [PDF link]({p.pdf_url})")
 
         if provider in ("openai", "gemini"):
