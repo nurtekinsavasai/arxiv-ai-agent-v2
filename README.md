@@ -1,201 +1,161 @@
-📘 Research Agent v2
+# 📘 Research Agent v3
 
 A lightweight research assistant that fetches, ranks, and explains recent AI papers from arXiv.
 Runs fully in Streamlit, supports OpenAI, Google Gemini, or a free local model, and produces ranked tables plus top-N highlight summaries.
 
-Now includes Human–Computer Interaction (cs.HC) in addition to cs.AI and cs.LG.
+Now includes **Advanced Venue Filtering** and coverage for **Human–Computer Interaction (cs.HC)** alongside cs.AI and cs.LG.
 
-🎥 Watch the short demo: https://youtu.be/4CvYLwlhXac
+🎥 **Watch the demo:** https://youtu.be/4CvYLwlhXac
 
-🚀 What's New in v2
+---
 
-Three pipeline modes
+## 🚀 What's New in v3
+
+### 🏷️ Smart Venue Filtering
+
+You can now filter papers by publication venue without losing semantic quality:
+
+- **Filter Types:** "All Conferences", "All Journals", or "Specific Venue"
+- **Specific Selection:** Pick individual top-tier venues like NeurIPS, CVPR, ICML, Nature, or Science
+- **Smart Pipeline:** The agent performs semantic search on all papers first to understand the landscape, and then applies your venue filter. This ensures the AI sees the full context of related work before narrowing down to your preferences
+
+### 🛡️ Robust arXiv Fetching
+
+- Improved rate-limiting logic to strictly adhere to arXiv's API policies (3-second delays, smart backoff)
+- Prevents IP bans during large data fetches
+
+---
+
+## Three Pipeline Modes
 
 You can run the system using:
 
-1. OpenAI Mode
+### 1. OpenAI Mode
 
-Requires an OpenAI API key.
-Enables the full experience:
+**Requires:** OpenAI API key
 
-LLM-based relevance classification
+**Features:**
+- LLM-based relevance classification (Primary/Secondary/Off-topic)
+- 1-year citation impact scoring using LLM judgment
+- Plain English summaries of top papers
+- Explanation factors for citation scores
+- Highest accuracy ranking
 
-1-year citation impact scoring using LLM judgment
+### 2. Gemini Mode (Google AI)
 
-Plain English summaries of top papers
+**Requires:** Google Gemini API key
 
-Explanation factors for impact scores
+**Features:**
+- Full support for Gemini 3 Pro (Preview), Gemini 2.5 Flash, and Gemini 2.0 Flash
+- Fast parallel processing for classification
+- Plain English summaries and citation impact scoring
+- Cost-effective high performance
 
-Higher-accuracy and more nuanced ranking
+### 3. Free Local Model Mode (Default)
 
-2. Gemini Mode (Google AI)
+**Requires:** No API key (runs on CPU)
 
-Requires a Google Gemini API key.
-Provides the full experience using Google's latest models:
+**Features:**
+- Uses local embeddings (MiniLM-L6-v2) for search
+- Uses simple heuristic relevance + heuristic citation scoring
+- Skips LLM summaries/explanations
+- Great for quick browsing or offline use
 
-Supports Gemini 3 Pro (Preview), Gemini 2.5 Flash, Gemini 2.5 Pro, and Gemini 2.0 Flash (Exp)
+---
 
-Fast parallel processing for classification
+## 🧠 How It Works (Pipeline Overview)
 
-Plain English summaries and citation impact scoring
+Whether using OpenAI, Gemini, or free mode, the pipeline follows these 9 steps:
 
-3. Free Local Model Mode (Default)
+### 1. You provide a Brief
 
-Runs entirely locally on your machine.
+- A short natural language research brief (e.g., "Agents that use tool use")
+- Optional "not looking for" constraints
+- Date range (Last 3 days, Last week, Last month)
 
-No API key needed
+### 2. Fetch Papers
 
-Uses local embeddings (MiniLM-L6-v2)
+- Downloads recent papers from **cs.AI** (Artificial Intelligence), **cs.LG** (Machine Learning), and **cs.HC** (Human-Computer Interaction)
+- Respects arXiv API rate limits
 
-Uses simple heuristic relevance + heuristic citation scoring
+### 3. Candidate Selection
 
-Skips LLM summaries
+- **Targeted Mode:** Embeds your brief and paper abstracts, then selects the top ~150 semantically similar papers
+- **Global Mode:** Selects the most recent 150 papers overall
 
-Still fetches and processes up to ~150 papers
+### 4. Venue Filtering (New in v3)
 
-Great for quick browsing or for users without API access
+- If enabled, filters the candidates to keep only those from your selected venues (e.g., "NeurIPS only")
+- Applied **after** embedding search to ensure the best semantic matches are found first
 
-All modes share the same UI and the same pipeline.
-Only the classification and scoring steps differ.
+### 5. Relevance Classification
 
-🧠 How It Works (Pipeline Overview)
+- **LLM Mode:** The AI reads each abstract and classifies it as Primary, Secondary, or Off-topic
+- **Free Mode:** Uses cosine similarity thresholds
 
-Whether using OpenAI, Gemini, or free mode, the pipeline is:
+### 6. Citation Scoring Set
 
-1. You provide
+- Keeps all Primary papers
+- Tops up with the strongest Secondary papers until reaching ~20 candidates (to save costs/time)
 
-A short research brief
+### 7. Citation Impact Scoring
 
-Optional "not looking for" text
+- **LLM Mode:** Asks the model to predict a "1-year citation impact score" based on topic trendiness, author fame, and novelty
+- **Free Mode:** Derives a score from semantic relevance
 
-A date window: Last 3 days, Last week, Last month
+### 8. Ranking & Highlights
 
-2. The agent fetches papers
+- Ranks papers by their Impact Score
+- Displays metadata, PDF links, and plain English summaries for the Top N
 
-It downloads recent papers from these categories:
+### 9. Export
 
-cs.AI – Artificial Intelligence
+- Generates a full Markdown Report
+- Saves all intermediate JSON data
+- Available as a ZIP download directly from the UI
 
-cs.LG – Machine Learning
+---
 
-cs.HC – Human–Computer Interaction
+## 💻 Running Locally
 
-3. Candidate selection
+This is a **UI-only application (Streamlit)**. No backend server is required.
 
-In targeted mode, it embeds the brief and abstracts then selects top-150 most similar
+### 1. Clone the repo:
 
-In global mode, it simply takes the most recent 150
-
-4. Relevance classification
-
-OpenAI / Gemini mode: LLM assigns primary, secondary, or off-topic
-
-Free mode: heuristic based on embedding similarity
-
-5. Citation scoring set
-
-The agent:
-
-Keeps all primary papers
-
-Tops up with the strongest secondary papers until reaching ~20, when possible
-
-In global mode, uses all candidates
-
-6. Citation impact scoring
-
-OpenAI / Gemini mode: asks the LLM for a 1-year citation impact score and 3 explanation factors
-
-Free mode: derives a score from relevance and embedding similarity
-
-These are impact signals, not predictions.
-
-7. Ranking
-
-Primary papers ranked first by citation score
-
-Secondary papers follow
-
-Off-topic (rare) come last
-
-8. Top-N highlighted papers
-
-Displays:
-
-Metadata
-
-Links to PDF and arXiv
-
-Relevance reasoning
-
-Citation impact score
-
-Plain English summary (OpenAI / Gemini mode only)
-
-9. Export
-
-A full Markdown report and all intermediate JSON files saved under:
-
-~/arxiv_ai_digest_projects/project_<timestamp>
-
-
-Downloadable as a ZIP from the UI.
-
-💻 Running Locally (Only a UI — No backend server required)
-
-Clone the repo:
-
-git clone [https://github.com/nurtekinsavasai/arxiv-ai-agent-v2.git](https://github.com/nurtekinsavasai/arxiv-ai-agent-v2.git)
+```bash
+git clone https://github.com/nurtekinsavasai/arxiv-ai-agent-v2.git
 cd arxiv-ai-agent-v2
+```
 
+### 2. Create a virtual environment:
 
-Create a virtual environment:
-
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
+# On Windows: .venv\Scripts\activate
+```
 
+### 3. Install dependencies:
 
-Install dependencies:
-
+```bash
 pip install -r requirements.txt
 pip install google-genai  # Required if using Gemini mode
+```
 
+### 4. Run the app:
 
-Run the app:
-
+```bash
 streamlit run app.py
+```
 
+Your browser will open automatically at `http://localhost:8501`.
 
-Your browser opens automatically.
+---
 
-🔌 Choosing a Provider
+## 🔌 Choosing a Provider
 
-Option A — OpenAI
-
-Select "OpenAI" and enter:
-
-API key
-
-Chat model (default: gpt-4.1-mini)
-
-Enables full classification, scoring, explanations, and summaries.
-
-Option B — Gemini (Google AI)
-
-Select "Gemini" and enter:
-
-API Key (from Google AI Studio)
-
-Chat model (default: gemini-3-pro-preview or gemini-2.5-flash)
-
-Enables full classification, scoring, explanations, and summaries.
-
-Option C — Free Local Model
-
-Select "Free local model".
-
-No API key needed
-
-Uses CPU-only MiniLM embeddings
-
-Uses heuristic relevance + heuristic citation impact
+| Option | Requirements | Best For |
+|--------|-------------|----------|
+| **OpenAI** | API Key | Highest quality summaries and reasoning. (GPT-4o, GPT-4.1) |
+| **Gemini** | API Key (Google AI Studio) | Speed and large context windows. (Gemini 3 Pro, Flash 2.5) |
+| **Free Local** | CPU | Privacy, offline use, and zero cost |
