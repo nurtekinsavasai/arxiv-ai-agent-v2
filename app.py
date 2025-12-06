@@ -285,10 +285,13 @@ def fetch_arxiv_papers_by_date(
                         "Try a shorter date range or run again later."
                     )
                     return results
-                wait_seconds = 5 * (2 ** (retries - 1))
+                
+                # UPDATED: More conservative backoff for arXiv (starts at 30s)
+                # arXiv recommends 3s delay between calls, but if banned, wait longer.
+                wait_seconds = 30 * retries 
                 st.warning(
                     f"arXiv rate limit (HTTP 429) encountered. "
-                    f"Waiting {wait_seconds} seconds before retry {retries}/{max_retries}."
+                    f"Waiting {wait_seconds} seconds before retry {retries}/{max_retries}..."
                 )
                 time.sleep(wait_seconds)
                 continue
@@ -349,6 +352,8 @@ def fetch_arxiv_papers_by_date(
             results.append(paper)
 
         start_index += batch_size
+        
+        # UPDATED: Increased sleep to 3.0s to respect arXiv terms of service
         time.sleep(3.0)
 
     if len(results) >= max_batches * batch_size:
@@ -923,40 +928,44 @@ def summarize_paper_plain_english(paper: Paper, llm_config: LLMConfig) -> str:
 # =========================
 
 PIPELINE_DESCRIPTION_MD = """
-#### Describe what you want
+#### 1. Describe what you want
 
 You write a short research brief in natural language about the kind of work you care about, and optionally what you are not interested in. If you leave both fields empty, the agent switches to a global mode and just looks for the most impactful recent cs.AI, cs.LG, and cs.HC papers overall.
 
-#### The agent fetches recent arXiv papers
+#### 2. The agent fetches recent arXiv papers
 
-It fetches up to about 5000 papers from arxiv.org in the Artificial Intelligence, Machine Learning, and Human–Computer Interaction categories (`cs.AI`, `cs.LG`, and `cs.HC`) for the date range you choose.
+It fetches up to about 5000 papers from arxiv.org in the Artificial Intelligence, Machine Learning, and Human–Computer Interaction categories (`cs.AI`, `cs.LG`, and `cs.HC`) for the date range you choose. It does this carefully, respecting arXiv's API rate limits.
 
-#### The agent picks candidate papers
+#### 3. The agent picks candidate papers
 
-- In **targeted mode**, the agent uses embeddings to measure how close each paper's title and abstract are toyour brief in meaning and keeps the top 150 as candidates.  
+- In **targeted mode**, the agent uses embeddings to measure how close each paper's title and abstract are to your brief in meaning and keeps the top 150 as candidates.
 - In **global mode**, it simply takes the most recent 150 `cs.AI`, `cs.LG`, and `cs.HC` papers as candidates.
 
-#### The agent judges how relevant each paper is
+#### 4. The agent filters by venue (Optional)
 
-- In **LLM API mode** (OpenAI or Gemini), a model reads each candidate and labels it as primary, secondary, or off topic.  
+If you selected a venue filter (e.g. "NeurIPS only" or "All Journals"), the agent applies it **after** the embedding search. This ensures that the agent first identifies the most semantically relevant papers from the entire pool, and then narrows them down to your preferred venues.
+
+#### 5. The agent judges how relevant each paper is
+
+- In **LLM API mode** (OpenAI or Gemini), a model reads each candidate and labels it as primary, secondary, or off topic.
 - In **free local mode**, the agent uses a simple heuristic based on the embedding similarity to mark the most relevant papers as primary and the rest as secondary.
 
-#### The agent builds a citation impact set
+#### 6. The agent builds a citation impact set
 
 The agent builds a set of papers to send to the citation impact step:
 
-- It keeps all **primary** papers.  
-- If there are fewer than about 20, it tops up with the strongest **secondary** papers until it reaches roughly 20, when possible.  
+- It keeps all **primary** papers.
+- If there are fewer than about 20, it tops up with the strongest **secondary** papers until it reaches roughly 20, when possible.
 - In global mode, all candidates are used.
 
-#### The agent computes 1-year citation impact scores
+#### 7. The agent computes 1-year citation impact scores
 
-- In **LLM API mode** (OpenAI or Gemini), a model estimates a 1-year citation impact score for each paper and provides short explanations.  
+- In **LLM API mode** (OpenAI or Gemini), a model estimates a 1-year citation impact score for each paper and provides short explanations.
 - In **free local mode**, the agent derives a citation impact score from the relevance signals and uses that to rank papers.
 
 These scores are heuristic impact signals and are best used for ranking within this batch, not as ground truth.
 
-#### The agent ranks, summarizes, and saves results
+#### 8. The agent ranks, summarizes, and saves results
 
 The agent ranks papers, always showing **primary** papers first, then secondary ones. For the top N that you choose, it shows metadata, relevance signals, and links to arXiv and the PDF. In LLM API mode it also adds plain English summaries. All artifacts and a markdown report are saved in a project folder under `~/arxiv_ai_digest_projects/project_<timestamp>`, and you can download everything as a ZIP.
 """
