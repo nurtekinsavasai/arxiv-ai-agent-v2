@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, date
 from typing import List, Optional, Dict, Any
+from groq import Groq
 
 try:
     import streamlit as st
@@ -409,6 +410,18 @@ def call_llm(prompt: str, llm_config: LLMConfig, label: str = "") -> str:
             )
             # google-genai responses have a .text convenience property
             return response.text
+        
+        elif llm_config.provider == "groq":
+            client = Groq(api_key=llm_config.api_key)
+            response = client.chat.completions.create(
+                model=llm_config.model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+            )
+            return response.choices[0].message.content
 
         else:
             raise ValueError(f"Unknown provider: {llm_config.provider}")
@@ -1074,10 +1087,12 @@ def main():
         provider_label_free = "Free local model (no API key)"
         provider_label_openai = "OpenAI (API key required)"
         provider_label_gemini = "Gemini (API key required)"
+        provider_label_groq = "Groq (API key required)"
+
 
         provider_choice = st.radio(
             "Choose provider",
-            [provider_label_free, provider_label_openai, provider_label_gemini],
+            [provider_label_free, provider_label_openai, provider_label_gemini, provider_label_groq],
             index=0,
         )
 
@@ -1085,6 +1100,8 @@ def main():
             provider = "openai"
         elif provider_choice == provider_label_gemini:
             provider = "gemini"
+        elif provider_choice == provider_label_groq:
+            provider = "groq"
         else:
             provider = "free_local"
 
@@ -1161,6 +1178,39 @@ def main():
 
             embedding_model_name = GEMINI_EMBEDDING_MODEL_NAME
             st.caption(f"Embeddings (Gemini): `{embedding_model_name}`")
+
+        elif provider == "groq":
+            st.markdown("### ⚡ Groq Settings")
+            api_key = st.text_input("Groq API Key", type="password")
+            st.caption(
+                "Groq API keys are free. No credit card needed. "
+                "Get yours at https://console.groq.com"
+            )
+
+            groq_models = [
+                "llama-3.1-70b-versatile",
+                "llama-3.1-8b-instant",
+                "mixtral-8x7b-32768",
+                "gemma2-9b-it",
+                "Custom",
+            ]
+
+            model_choice = st.selectbox(
+                "Groq Model",
+                groq_models,
+                index=0,
+            )
+
+            if model_choice == "Custom":
+                model_name = st.text_input(
+                    "Custom Groq Model Name",
+                    value="llama-3.1-70b-versatile",
+                )
+            else:
+                model_name = model_choice
+
+            embedding_model_name = "sentence-transformers/all-MiniLM-L6-v2"
+            st.caption("Using free local MiniLM embeddings (Groq does not provide embeddings).")
 
         else:
             api_key = ""
