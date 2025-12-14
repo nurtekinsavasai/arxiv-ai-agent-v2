@@ -1,148 +1,134 @@
-# 📘 Research Agent v3
+# 🔎 Research Agent v3 (with Groq Support)
 
-A lightweight research assistant that fetches, ranks, and explains recent AI papers from arXiv.
-Runs fully in Streamlit, supports OpenAI, Google Gemini, or a free local model, and produces ranked tables plus top-N highlight summaries.
+A lightweight, intelligent research assistant that fetches, ranks, and explains recent AI papers from arXiv.
 
-Now includes **Advanced Venue Filtering** and coverage for **Human–Computer Interaction (cs.HC)** alongside cs.AI and cs.LG.
+It runs fully in Streamlit and acts as a **"Universal Brain"** for research—you can plug in OpenAI, Google Gemini, or Groq to handle the reasoning, or run it entirely offline with a Free Local Model.
+
+It produces ranked tables, citation impact scores, and "Plain English" summaries for the top papers.
 
 🎥 **Watch the demo:** https://youtu.be/4CvYLwlhXac
 
 ---
 
-## 🚀 What's New in v3
+## 🚀 What's New
+
+### ⚡ Groq Integration (Llama 3.1)
+
+You can now use **Groq** as your intelligence provider. This allows you to run high-performance open-source models (like Llama 3.1 70B, Mixtral 8x7b) with blazing fast inference speeds and **free API access**.
+
+**Note:** In Groq mode, the agent uses local embeddings for search and the Groq LLM for reasoning.
 
 ### 🏷️ Smart Venue Filtering
 
-You can now filter papers by publication venue without losing semantic quality:
+Filter papers by publication venue without losing semantic quality:
 
 - **Filter Types:** "All Conferences", "All Journals", or "Specific Venue"
 - **Specific Selection:** Pick individual top-tier venues like NeurIPS, CVPR, ICML, Nature, or Science
-- **Smart Pipeline:** The agent performs semantic search on all papers first to understand the landscape, and then applies your venue filter. This ensures the AI sees the full context of related work before narrowing down to your preferences
+- **Smart Pipeline:** The agent performs semantic search on all papers first to understand the landscape, and then applies your venue filter. This ensures the AI sees the full context of related work before narrowing down.
 
 ### 🛡️ Robust arXiv Fetching
 
-- Improved rate-limiting logic to strictly adhere to arXiv's API policies (3-second delays, smart backoff)
-- Prevents IP bans during large data fetches
+- Improved rate-limiting logic to strictly adhere to arXiv's API policies
+- Prevents IP bans during large data fetches by using smart backoff (3-second delays)
 
 ---
 
-## Three Pipeline Modes
+## 🔌 Four Intelligence Modes
 
-You can run the system using:
+You can choose your **"Brain"** from the sidebar:
 
-### 1. OpenAI Mode
+### 1. OpenAI Mode (Best Quality)
 
-**Requires:** OpenAI API key
+**Requires:** OpenAI API Key
 
-**Features:**
-- LLM-based relevance classification (Primary/Secondary/Off-topic)
-- 1-year citation impact scoring using LLM judgment
-- Plain English summaries of top papers
-- Explanation factors for citation scores
-- Highest accuracy ranking
+**Models:** GPT-4o, GPT-4.1, O1
 
-### 2. Gemini Mode (Google AI)
+**Best For:** Highest quality reasoning, summaries, and citation predictions. Uses OpenAI embeddings for search.
 
-**Requires:** Google Gemini API key
+### 2. Gemini Mode (Best Context/Price)
 
-**Features:**
-- Full support for Gemini 3 Pro (Preview), Gemini 2.5 Flash, and Gemini 2.0 Flash
-- Fast parallel processing for classification
-- Plain English summaries and citation impact scoring
-- Cost-effective high performance
+**Requires:** Google Gemini API Key
 
-### 3. Free Local Model Mode (Default)
+**Models:** Gemini 3 Pro (Preview), Gemini 2.5 Flash, Gemini 2.0 Flash
 
-**Requires:** No API key (runs on CPU)
+**Best For:** Processing large batches of papers quickly. Uses Gemini embeddings.
 
-**Features:**
-- Uses local embeddings (MiniLM-L6-v2) for search
-- Uses simple heuristic relevance + heuristic citation scoring
-- Skips LLM summaries/explanations
-- Great for quick browsing or offline use
+### 3. Groq Mode (Fastest / Open Source)
 
----
+**Requires:** Groq API Key (Currently Free)
 
-## 🧠 How It Works (Pipeline Overview)
+**Models:** Llama 3.1 70B, Llama 3.1 8B, Mixtral 8x7b, Gemma 2
 
-Whether using OpenAI, Gemini, or free mode, the pipeline follows these 9 steps:
+**Best For:** Extremely fast speed and using open-weight models.
 
-### 1. You provide a Brief
+**Architecture:** Uses Local Embeddings (MiniLM) for search + Groq for classification/scoring.
 
-- A short natural language research brief (e.g., "Agents that use tool use")
-- Optional "not looking for" constraints
-- Date range (Last 3 days, Last week, Last month)
+### 4. Free Local Mode (Offline / Privacy)
 
-### 2. Fetch Papers
+**Requires:** No API Key. Runs on CPU.
 
-- Downloads recent papers from **cs.AI** (Artificial Intelligence), **cs.LG** (Machine Learning), and **cs.HC** (Human-Computer Interaction)
-- Respects arXiv API rate limits
+**Models:** SentenceTransformers (MiniLM-L6-v2) + Heuristics
 
-### 3. Candidate Selection
-
-- **Targeted Mode:** Embeds your brief and paper abstracts, then selects the top ~150 semantically similar papers
-- **Global Mode:** Selects the most recent 150 papers overall
-
-### 4. Venue Filtering (New in v3)
-
-- If enabled, filters the candidates to keep only those from your selected venues (e.g., "NeurIPS only")
-- Applied **after** embedding search to ensure the best semantic matches are found first
-
-### 5. Relevance Classification
-
-- **LLM Mode:** The AI reads each abstract and classifies it as Primary, Secondary, or Off-topic
-- **Free Mode:** Uses cosine similarity thresholds
-
-### 6. Citation Scoring Set
-
-- Keeps all Primary papers
-- Tops up with the strongest Secondary papers until reaching ~20 candidates (to save costs/time)
-
-### 7. Citation Impact Scoring
-
-- **LLM Mode:** Asks the model to predict a "1-year citation impact score" based on topic trendiness, author fame, and novelty
-- **Free Mode:** Derives a score from semantic relevance
-
-### 8. Ranking & Highlights
-
-- Ranks papers by their Impact Score
-- Displays metadata, PDF links, and plain English summaries for the Top N
-
-### 9. Export
-
-- Generates a full Markdown Report
-- Saves all intermediate JSON data
-- Available as a ZIP download directly from the UI
+**Best For:** Offline use, zero cost, and quick browsing without LLM summaries.
 
 ---
 
-## 💻 Running Locally
+## 🧠 How It Works (The Pipeline)
 
-This is a **UI-only application (Streamlit)**. No backend server is required.
+The agent follows a **9-step pipeline** to distill hundreds of papers into the top 3:
 
-### 1. Clone the repo:
+1. **Briefing:** You provide a natural language "Research Brief" (e.g., "Agents that use tool use") and optional constraints.
+
+2. **Fetching:** It downloads recent metadata from **cs.AI**, **cs.LG**, and **cs.HC** via the arXiv API.
+
+3. **Semantic Search:**
+   - **OpenAI/Gemini:** Uses cloud embeddings to find papers semantically similar to your brief.
+   - **Groq/Local:** Uses local sentence-transformers to embed and rank papers on your CPU.
+
+4. **Venue Filtering:** Filters candidates (e.g., "NeurIPS only") after the semantic search.
+
+5. **LLM Classification:** The chosen LLM reads the abstracts and classifies papers as **Primary** (direct match), **Secondary** (partial match), or **Off-topic**.
+
+6. **Scoring Set:** It builds a final list of ~20 papers to score, prioritizing Primary matches.
+
+7. **Impact Scoring:** The LLM predicts a "1-Year Citation Impact Score" (0-100) based on novelty, author/lab reputation (if visible), and topic trendiness.
+
+8. **Ranking:** Papers are ranked by this score.
+
+9. **Reporting:** The UI displays metadata, PDF links, and generates a Plain English Summary for the top N papers.
+
+---
+
+## 💻 Usage Guide
+
+### Option A: Run Locally (Recommended)
+
+This is a pure Python application. No Docker or complex databases required.
+
+#### 1. Clone the repository:
 
 ```bash
 git clone https://github.com/nurtekinsavasai/arxiv-ai-agent-v2.git
 cd arxiv-ai-agent-v2
 ```
 
-### 2. Create a virtual environment:
+#### 2. Create a virtual environment:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-# On Windows: .venv\Scripts\activate
+# Windows: .venv\Scripts\activate
 ```
 
-### 3. Install dependencies:
+#### 3. Install dependencies:
 
 ```bash
 pip install -r requirements.txt
-pip install google-genai  # Required if using Gemini mode
+# Ensure you install groq if it wasn't automatically picked up
+pip install groq
 ```
 
-### 4. Run the app:
+#### 4. Run the app:
 
 ```bash
 streamlit run app.py
@@ -150,12 +136,33 @@ streamlit run app.py
 
 Your browser will open automatically at `http://localhost:8501`.
 
+### Option B: Deploy Online
+
+You can deploy this repo directly to **Streamlit Community Cloud** for free:
+
+1. Fork this repo to your GitHub.
+2. Log in to [share.streamlit.io](https://share.streamlit.io).
+3. Click "New App" and select your forked repo.
+
+**Important:** In the Streamlit Cloud settings, go to "Secrets" and add your API keys if you want them pre-loaded, or just enter them in the UI sidebar every time you use it.
+
 ---
 
-## 🔌 Choosing a Provider
+## 🛠️ For Developers
+
+- **`app.py`:** The entire application logic resides here. It is a single-file Streamlit app designed for portability.
+
+- **Modifying Prompt Logic:** Look for `classify_papers_with_llm` and `predict_citations_direct` functions in `app.py` to change how the AI judges papers.
+
+- **Adding Providers:** The code uses a `LLMConfig` dataclass. To add a new provider (e.g., Anthropic), add the client initialization in `call_llm` and the specific embedding logic in `select_embedding_candidates`.
+
+---
+
+## 📊 Comparison Table
 
 | Option | Requirements | Best For |
 |--------|-------------|----------|
 | **OpenAI** | API Key | Highest quality summaries and reasoning. (GPT-4o, GPT-4.1) |
 | **Gemini** | API Key (Google AI Studio) | Speed and large context windows. (Gemini 3 Pro, Flash 2.5) |
+| **Groq** | API Key (Free) | Fastest inference with open-source models. (Llama 3.1, Mixtral) |
 | **Free Local** | CPU | Privacy, offline use, and zero cost |
