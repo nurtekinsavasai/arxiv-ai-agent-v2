@@ -1,4 +1,4 @@
-# 🔎 Research Agent v3 (with Groq Support)
+# 🔎 Research Agent v4 
 
 A lightweight, intelligent research assistant that fetches, ranks, and explains recent AI papers from arXiv.
 
@@ -12,9 +12,9 @@ It produces ranked tables, citation impact scores, and "Plain English" summaries
 
 ## 🚀 What's New
 
-### ⚡ Groq Integration (Llama 3.1)
+### ⚡ Groq Integration (Llama 3.3)
 
-You can now use **Groq** as your intelligence provider. This allows you to run high-performance open-source models (like Llama 3.1 70B, Mixtral 8x7b) with blazing fast inference speeds and **free API access**.
+You can now use **Groq** as your intelligence provider. This allows you to run high-performance open-source models (like Llama 3.3 70B) with blazing fast inference speeds and **free API access**.
 
 **Note:** In Groq mode, the agent uses local embeddings for search and the Groq LLM for reasoning.
 
@@ -41,7 +41,7 @@ You can choose your **"Brain"** from the sidebar:
 
 **Requires:** OpenAI API Key
 
-**Models:** GPT-4o, GPT-4.1, O1
+**Models:** GPT-5.2, GPT-5, GPT-5-mini, GPT-5-nano, GPT-4o, GPT-4.1, GPT-4.1-mini, GPT-4.0-mini, GPT-o1
 
 **Best For:** Highest quality reasoning, summaries, and citation predictions. Uses OpenAI embeddings for search.
 
@@ -49,7 +49,7 @@ You can choose your **"Brain"** from the sidebar:
 
 **Requires:** Google Gemini API Key
 
-**Models:** Gemini 3 Pro (Preview), Gemini 2.5 Flash, Gemini 2.0 Flash
+**Models:** Gemini 3 Pro (Preview), Gemini 2.5 Flash, Gemini 2.5 Pro, Gemini 2.0 Flash
 
 **Best For:** Processing large batches of papers quickly. Uses Gemini embeddings.
 
@@ -57,9 +57,9 @@ You can choose your **"Brain"** from the sidebar:
 
 **Requires:** Groq API Key (Currently Free)
 
-**Models:** Llama 3.1 70B, Llama 3.1 8B, Mixtral 8x7b, Gemma 2
+**Models:** Llama 3.3 70B, Llama 3.1 8B
 
-**Best For:** Extremely fast speed and using open-weight models.
+**Best For:** Fast speed and using open-weight models.
 
 **Architecture:** Uses Local Embeddings (MiniLM) for search + Groq for classification/scoring.
 
@@ -101,7 +101,7 @@ The agent follows a **9-step pipeline** to distill hundreds of papers into the t
 
 ## 💻 Usage Guide
 
-### Option A: Run Locally (Recommended)
+### Run Locally 
 
 This is a pure Python application. No Docker or complex databases required.
 
@@ -135,18 +135,6 @@ streamlit run app.py
 ```
 
 Your browser will open automatically at `http://localhost:8501`.
-
-### Option B: Deploy Online
-
-You can deploy this repo directly to **Streamlit Community Cloud** for free:
-
-1. Fork this repo to your GitHub.
-2. Log in to [share.streamlit.io](https://share.streamlit.io).
-3. Click "New App" and select your forked repo.
-
-**Important:** In the Streamlit Cloud settings, go to "Secrets" and add your API keys if you want them pre-loaded, or just enter them in the UI sidebar every time you use it.
-
----
 
 ## 🛠️ For Developers
 
