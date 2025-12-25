@@ -812,7 +812,7 @@ def main():
         st.write(
             """Too many important papers get lost in the noise. Most researchers and practitioners cannot reliably scan what is new recently in their area, find truly promising work, and trust that they did not miss something big."""
             " This agent helps with this problem by finding, ranking, and explaining recent AI papers on arxiv.org."
-            "Run time can be lengthy if you select a large time window or a large backend LLM. Patience is a virtue for good things to come!"
+            " Run time can be lengthy if you select a large time window or a large backend LLM. Patience is a virtue for good things to come!"
         )
 
     # Sidebar
