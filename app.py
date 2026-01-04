@@ -1,3 +1,4 @@
+# app.py
 import os
 import json
 import time
@@ -9,6 +10,7 @@ import re
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, date
 from typing import List, Optional, Dict, Any
+from collections import Counter
 
 try:
     import streamlit as st
@@ -17,11 +19,23 @@ try:
     import pandas as pd
     from openai import OpenAI, NotFoundError, BadRequestError
     from groq import Groq
+
+    # Dashboard deps (required for the new feature)
+    import plotly.express as px
+    import matplotlib.pyplot as plt
 except ImportError as e:
     missing = str(e).split("'")[1]
     print(f"Missing package: {missing}")
-    print("Please run: pip install streamlit requests feedparser openai pandas groq")
+    print(
+        "Please run: pip install streamlit requests feedparser openai pandas groq plotly matplotlib"
+    )
     raise
+
+# Optional wordcloud (nice-to-have)
+try:
+    from wordcloud import WordCloud  # type: ignore
+except ImportError:
+    WordCloud = None  # type: ignore
 
 # Optional local embedding model for free mode
 try:
@@ -41,8 +55,6 @@ except ImportError:
 
 MIN_FOR_PREDICTION = 20
 OPENAI_EMBEDDING_MODEL_NAME = "text-embedding-3-large"
-MIN_FOR_PREDICTION = 20
-OPENAI_EMBEDDING_MODEL_NAME = "text-embedding-3-large"
 GEMINI_EMBEDDING_MODEL_NAME = "text-embedding-004"
 
 # MONEYBALL DEFAULTS
@@ -52,8 +64,6 @@ DEFAULT_MONEYBALL_WEIGHTS = {
     "weight_sniper": 0.0,
     "weight_utility": 0.16
 }
-
-
 
 # =========================
 # Data structures
@@ -205,6 +215,20 @@ JOURNAL_KEYWORDS = [
 
 NEGATIVE_VENUE_SIGNALS = ["submitted to", "under review", "preprint"]
 
+ARXIV_CATEGORIES: Dict[str, List[str]] = {
+    "Computer Science": [
+        "cs.AI", "cs.LG", "cs.HC", "cs.CL", "cs.CV", "cs.RO", "cs.IR", "cs.NE", "cs.SE",
+        "cs.CR", "cs.DS", "cs.DB", "cs.SI", "cs.MM", "cs.IT", "cs.PF", "cs.MA",
+    ],
+    "Statistics": ["stat.ML", "stat.AP", "stat.CO", "stat.TH"],
+    "Mathematics": ["math.OC", "math.ST", "math.IT", "math.PR", "math.NA"],
+    "Physics": ["physics.comp-ph", "physics.data-an", "physics.soc-ph", "physics.optics"],
+    "Quantitative Biology": ["q-bio.QM", "q-bio.NC", "q-bio.BM"],
+    "Quantitative Finance": ["q-fin.MF", "q-fin.ST", "q-fin.CP", "q-fin.TR"],
+    "Electrical Engineering and Systems Science": ["eess.IV", "eess.SP", "eess.SY", "eess.AS"],
+    "Economics": ["econ.EM", "econ.TH"],
+}
+
 def extract_venue(comment: str) -> Optional[str]:
     if not comment:
         return None
@@ -217,6 +241,290 @@ def extract_venue(comment: str) -> Optional[str]:
             return venue
     return None
 
+def build_arxiv_category_query(
+    main_category: str,
+    subcategories: List[str],
+) -> str:
+    """
+    Returns arXiv API query fragment like:
+      (cat:cs.AI OR cat:cs.LG OR cat:stat.ML)
+    If subcategories empty, falls back to all subcats in main_category.
+    If main_category == "All", uses all subcategories across all mains.
+    """
+    if main_category == "All":
+        cats = sorted({c for subs in ARXIV_CATEGORIES.values() for c in subs})
+    else:
+        cats = subcategories if subcategories else ARXIV_CATEGORIES.get(main_category, [])
+
+    # Safety fallback (so your app never crashes)
+    if not cats:
+        cats = ["cs.AI", "cs.LG", "cs.HC"]
+
+    return "(" + " OR ".join([f"cat:{c}" for c in cats]) + ")"
+
+
+# =========================
+# Trends Dashboard (Abstract-only EDA)
+# =========================
+
+TECH_STOPWORDS = set("""
+a an the and or if then else when while for to of in on at by with without into from over under
+is are was were be been being do does did done can could should would may might must will
+this that these those it its we our us you your they their them i me my
+as than such both either neither each per via using use used based approach method methods
+paper work study studies result results show shows shown demonstrate demonstrates demonstrated
+propose proposes proposed novel new state art sota framework model models system systems
+task tasks dataset datasets data experiments experimental evaluation evaluated performance
+improve improves improved improvement achieve achieves achieved
+""".split())
+
+TECH_KEEP_SHORT = {"ai", "ml", "cv", "nlp", "rl", "kg", "gnn", "llm", "rag", "vae", "gan", "vit"}
+
+def tokenize_technical(text: str) -> List[str]:
+    """
+    Extract technical-ish tokens from abstracts/titles:
+    - keep letters/digits/hyphens
+    - remove grammar + academic filler
+    - allow short tokens only if in TECH_KEEP_SHORT
+    """
+    if not text:
+        return []
+
+    t = text.lower()
+    t = re.sub(r"[^\w\s\-]", " ", t)  # keep words, digits, hyphens
+    t = re.sub(r"\s+", " ", t).strip()
+
+    tokens = []
+    for tok in t.split(" "):
+        tok = tok.strip("-_")
+        if not tok:
+            continue
+        if tok.isdigit():
+            continue
+
+        if len(tok) < 3 and tok not in TECH_KEEP_SHORT:
+            continue
+
+        if tok in TECH_STOPWORDS:
+            continue
+
+        if tok in {"et", "al", "figure", "table", "section"}:
+            continue
+
+        tokens.append(tok)
+
+    return tokens
+
+
+def extract_acronyms(text: str) -> List[str]:
+    """
+    Pull acronyms/model-like tokens: LLM, RAG, ViT, YOLOv8, NeRF, SAM, BERT, etc.
+    """
+    if not text:
+        return []
+    found = re.findall(r"\b[A-Z]{2,}[A-Z0-9\-]*\b", text)
+    drop = {"USA", "HTTP", "IEEE"}  # customize
+    return [f for f in found if f not in drop]
+
+
+TECH_BUCKETS: Dict[str, List[str]] = {
+    "LLMs & Reasoning": ["llm", "gpt", "instruction", "chain-of-thought", "cot", "reasoning", "alignment"],
+    "RAG & Retrieval": ["rag", "retrieval", "vector", "embedding", "dense retrieval", "bm25", "reranker"],
+    "Diffusion & Generative": ["diffusion", "score-based", "latent diffusion", "stable diffusion", "generative", "gan", "vae"],
+    "Vision Models": ["vit", "vision transformer", "yolo", "sam", "segment", "detection", "tracking"],
+    "Multimodal": ["multimodal", "vision-language", "vlm", "image-text", "video-text", "audio-text"],
+    "Graphs & Knowledge": ["gnn", "graph", "knowledge graph", "kg", "link prediction", "graph neural"],
+    "Reinforcement Learning": ["reinforcement", "rl", "policy", "reward", "actor-critic", "bandit"],
+    "Federated / Privacy": ["federated", "dp", "differential privacy", "secure aggregation", "privacy"],
+    "Robustness & Safety": ["robust", "adversarial", "safety", "jailbreak", "toxicity", "guardrail", "bias", "fairness"],
+    "Optimization / Efficiency": ["quantization", "distillation", "pruning", "efficient", "low-rank", "lora", "compression"],
+}
+
+def bucket_counts(papers: List[Paper]) -> Dict[str, int]:
+    counts = {k: 0 for k in TECH_BUCKETS.keys()}
+    for p in papers:
+        text = f"{p.title} {p.abstract}".lower()
+        for bucket, keys in TECH_BUCKETS.items():
+            if any(k in text for k in keys):
+                counts[bucket] += 1
+    return counts
+
+
+def cooccurrence_matrix(tokens_per_doc: List[List[str]], top_terms: List[str]) -> "pd.DataFrame":
+    idx = {t: i for i, t in enumerate(top_terms)}
+    mat = [[0 for _ in top_terms] for __ in top_terms]
+
+    for toks in tokens_per_doc:
+        s = set(toks)
+        present = [t for t in top_terms if t in s]
+        for i in range(len(present)):
+            for j in range(i, len(present)):
+                a, b = present[i], present[j]
+                ia, ib = idx[a], idx[b]
+                mat[ia][ib] += 1
+                if ia != ib:
+                    mat[ib][ia] += 1
+
+    return pd.DataFrame(mat, index=top_terms, columns=top_terms)
+
+
+def render_trends_dashboard(
+    papers_for_dashboard: List[Paper],
+    top_k_terms: int = 25,
+    trend_terms: int = 8,
+    max_heat_terms: int = 15
+):
+    """
+    Streamlit trends dashboard built ONLY from abstracts/titles.
+    - removes grammar/common words
+    - focuses on technical tokens and buckets
+    """
+    if not papers_for_dashboard:
+        st.info("No papers available for trends dashboard.")
+        return
+
+    st.subheader("📊 Trends Dashboard (Abstract-only EDA)")
+    st.caption("Built from **titles + abstracts only**. Grammar/common English removed to surface technical signals.")
+
+    rows = []
+    for p in papers_for_dashboard:
+        rows.append({
+            "arxiv_id": p.arxiv_id,
+            "title": p.title,
+            "abstract": p.abstract,
+            "submitted_date": p.submitted_date.date() if p.submitted_date else None,
+        })
+    df = pd.DataFrame(rows)
+    df["submitted_date"] = pd.to_datetime(df["submitted_date"])
+
+    tokens_per_doc = [tokenize_technical(f"{t}\n{a}") for t, a in zip(df["title"], df["abstract"])]
+    all_tokens = [tok for doc in tokens_per_doc for tok in doc]
+    freq = Counter(all_tokens)
+
+    if not all_tokens:
+        st.warning("No technical tokens extracted (stopword list may be too aggressive).")
+        return
+
+    top_terms = [t for t, _ in freq.most_common(top_k_terms)]
+    term_df = pd.DataFrame(freq.most_common(top_k_terms), columns=["term", "count"])
+
+    bcounts = bucket_counts(papers_for_dashboard)
+    bucket_df = pd.DataFrame(
+        [{"bucket": k, "papers": v} for k, v in bcounts.items()]
+    ).sort_values("papers", ascending=False)
+
+    acr = []
+    for p in papers_for_dashboard:
+        acr.extend(extract_acronyms(f"{p.title}\n{p.abstract}"))
+    acr_df = pd.DataFrame(Counter(acr).most_common(20), columns=["acronym", "count"])
+
+    c1, c2 = st.columns([1, 1])
+
+    with c1:
+        st.markdown("### ☁️ Technical Word Cloud")
+        if WordCloud is None:
+            st.info("`wordcloud` not installed. Install via `pip install wordcloud` to enable this plot.")
+            fig = px.bar(term_df.sort_values("count", ascending=True), x="count", y="term", orientation="h")
+            fig.update_layout(height=420, margin=dict(l=20, r=20, t=40, b=20))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            wc_text = " ".join(all_tokens)
+            wc = WordCloud(
+                width=900,
+                height=500,
+                background_color="white",
+                collocations=False,
+                max_words=120
+            ).generate(wc_text)
+
+            fig, ax = plt.subplots(figsize=(10, 5))
+            ax.imshow(wc, interpolation="bilinear")
+            ax.axis("off")
+            st.pyplot(fig, use_container_width=True)
+
+    with c2:
+        st.markdown("### 🧩 Technology / Idea Buckets")
+        fig = px.bar(
+            bucket_df,
+            x="papers",
+            y="bucket",
+            orientation="h",
+            text="papers",
+            title="How many papers mention each theme (Top set)",
+        )
+        fig.update_layout(height=420, margin=dict(l=20, r=20, t=50, b=20))
+        st.plotly_chart(fig, use_container_width=True)
+
+    c3, c4 = st.columns([1, 1])
+
+    with c3:
+        st.markdown("### 📌 Top Technical Terms")
+        fig = px.bar(
+            term_df.sort_values("count", ascending=True),
+            x="count",
+            y="term",
+            orientation="h",
+            title="Most frequent technical tokens (stopwords removed)",
+        )
+        fig.update_layout(height=450, margin=dict(l=20, r=20, t=50, b=20))
+        st.plotly_chart(fig, use_container_width=True)
+
+    with c4:
+        st.markdown("### 🧠 Acronyms / Model Tokens")
+        if acr_df.empty:
+            st.info("No acronyms detected in abstracts/titles.")
+        else:
+            fig = px.bar(
+                acr_df.sort_values("count", ascending=True),
+                x="count",
+                y="acronym",
+                orientation="h",
+                title="Most common acronyms (LLM, RAG, YOLOv8, ...)",
+            )
+            fig.update_layout(height=450, margin=dict(l=20, r=20, t=50, b=20))
+            st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("### 📈 Term Trend Over Time")
+    if df["submitted_date"].isna().all() or df["submitted_date"].nunique() < 2:
+        st.info("Not enough date diversity to show a trend line.")
+    else:
+        k_terms = top_terms[:min(trend_terms, len(top_terms))]
+        trend_rows = []
+        for _, r in df.iterrows():
+            toks = set(tokenize_technical(f"{r['title']} {r['abstract']}"))
+            for t in k_terms:
+                trend_rows.append({
+                    "date": r["submitted_date"].date(),
+                    "term": t,
+                    "present": 1 if t in toks else 0
+                })
+
+        tdf = pd.DataFrame(trend_rows)
+        agg = tdf.groupby(["date", "term"])["present"].sum().reset_index()
+
+        fig = px.line(
+            agg, x="date", y="present", color="term",
+            markers=True,
+            title="Mentions per day (# papers mentioning term)",
+        )
+        fig.update_layout(height=420, margin=dict(l=20, r=20, t=50, b=20), yaxis_title="# papers")
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("### 🔥 Term Co-occurrence Heatmap")
+    heat_terms = top_terms[:min(max_heat_terms, len(top_terms))]
+    if len(heat_terms) < 8:
+        st.info("Not enough extracted terms to build a co-occurrence heatmap.")
+    else:
+        co_df = cooccurrence_matrix(tokens_per_doc, heat_terms)
+        fig = px.imshow(
+            co_df,
+            text_auto=True,
+            aspect="auto",
+            title="Doc-level co-occurrence (terms appearing in the same abstract)",
+        )
+        fig.update_layout(height=520, margin=dict(l=20, r=20, t=50, b=20))
+        st.plotly_chart(fig, use_container_width=True)
+
 
 # =========================
 # Robust arXiv fetching
@@ -225,11 +533,12 @@ def extract_venue(comment: str) -> Optional[str]:
 def fetch_arxiv_papers_by_date(
     start_date: date,
     end_date: date,
+    arxiv_query: Optional[str] = None,
     batch_size: int = 50,
     max_batches: int = 100,
     max_retries: int = 3,
 ) -> List[Paper]:
-    query = "(cat:cs.AI OR cat:cs.LG OR cat:cs.HC)"
+    query = arxiv_query or "(cat:cs.AI OR cat:cs.LG OR cat:cs.HC)"
     base_url = "https://export.arxiv.org/api/query"
 
     results: List[Paper] = []
@@ -276,10 +585,12 @@ def fetch_arxiv_papers_by_date(
 
         for entry in feed.entries:
             published_str = entry.get("published", "")
-            if not published_str: continue
+            if not published_str:
+                continue
             published_dt = datetime.fromisoformat(published_str.replace("Z", "+00:00"))
             published_date = published_dt.date()
 
+            # NOTE: arXiv returns in descending order; once we go beyond start_date, we can stop.
             if published_date < start_date:
                 return results
 
@@ -337,12 +648,11 @@ def call_llm(prompt: str, llm_config: LLMConfig, label: str = "") -> str:
                 {"role": "user", "content": prompt},
             ]
             kwargs: Dict[str, Any] = {"model": llm_config.model, "messages": messages}
-            
-            # Logic Update: Do NOT set temperature for o1 or ANY gpt-5 variant
-            # This covers gpt-5, gpt-5.2, gpt-5-mini, gpt-5-nano, etc.
+
+            # Do NOT set temperature for o1 or ANY gpt-5 variant
             if not (llm_config.model.startswith("o1") or llm_config.model.startswith("gpt-5")):
                 kwargs["temperature"] = 0.2
-            
+
             resp = client.chat.completions.create(**kwargs)
             return resp.choices[0].message.content
 
@@ -378,7 +688,8 @@ def call_llm(prompt: str, llm_config: LLMConfig, label: str = "") -> str:
 
 
 def safe_parse_json_array(raw: str) -> Optional[List[Dict[str, Any]]]:
-    if not raw or not raw.strip(): return None
+    if not raw or not raw.strip():
+        return None
     text = raw.strip()
     if text.startswith("```"):
         lines = text.splitlines()[1:]
@@ -386,20 +697,23 @@ def safe_parse_json_array(raw: str) -> Optional[List[Dict[str, Any]]]:
             lines = lines[:-1]
         text = "\n".join(lines).strip()
 
-    # Try finding brackets
     start = text.find("[")
     end = text.rfind("]")
     if start != -1 and end != -1 and end > start:
         candidate = text[start:end + 1]
         try:
             parsed = json.loads(candidate)
-            if isinstance(parsed, list): return parsed
-        except: pass
+            if isinstance(parsed, list):
+                return parsed
+        except:
+            pass
 
     try:
         parsed = json.loads(text)
-        if isinstance(parsed, list): return parsed
-    except: return None
+        if isinstance(parsed, list):
+            return parsed
+    except:
+        return None
     return None
 
 
@@ -408,7 +722,8 @@ def safe_parse_json_array(raw: str) -> Optional[List[Dict[str, Any]]]:
 # =========================
 
 def embed_texts_openai(texts: List[str], llm_config: LLMConfig, embedding_model: str) -> List[List[float]]:
-    if not texts: return []
+    if not texts:
+        return []
     client = OpenAI(api_key=llm_config.api_key, base_url=llm_config.api_base)
     all_embeddings: List[List[float]] = []
     batch_size = 100
@@ -425,7 +740,8 @@ def embed_texts_openai(texts: List[str], llm_config: LLMConfig, embedding_model:
 
 
 def embed_texts_gemini(texts: List[str], llm_config: LLMConfig, embedding_model: str) -> List[List[float]]:
-    if not texts: return []
+    if not texts:
+        return []
     if genai is None:
         st.error("google-genai package missing.")
         st.stop()
@@ -452,7 +768,8 @@ def get_local_embed_model() -> SentenceTransformer:
 
 
 def embed_texts_local(texts: List[str]) -> List[List[float]]:
-    if not texts: return []
+    if not texts:
+        return []
     try:
         model = get_local_embed_model()
     except Exception as e:
@@ -463,11 +780,13 @@ def embed_texts_local(texts: List[str]) -> List[List[float]]:
 
 
 def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
-    if not vec1 or not vec2 or len(vec1) != len(vec2): return 0.0
+    if not vec1 or not vec2 or len(vec1) != len(vec2):
+        return 0.0
     dot = sum(a * b for a, b in zip(vec1, vec2))
     norm1 = sum(a * a for a in vec1)
     norm2 = sum(b * b for b in vec2)
-    if norm1 == 0.0 or norm2 == 0.0: return 0.0
+    if norm1 == 0.0 or norm2 == 0.0:
+        return 0.0
     return dot / (math.sqrt(norm1) * math.sqrt(norm2))
 
 
@@ -479,21 +798,19 @@ def select_embedding_candidates(
     provider: str,
     max_candidates: int = 150,
 ) -> List[Paper]:
-    if not papers: return []
+    if not papers:
+        return []
 
-    # 1) Embed the query
     try:
         if provider == "openai":
             query_vec = embed_texts_openai([query_brief], llm_config, embedding_model)[0]
         elif provider == "gemini":
             query_vec = embed_texts_gemini([query_brief], llm_config, embedding_model)[0]
         else:
-            # "free_local" OR "groq" uses local embeddings
             query_vec = embed_texts_local([query_brief])[0]
     except Exception:
         return papers
 
-    # 2) Embed all papers
     texts = [p.title + "\n\n" + p.abstract for p in papers]
     try:
         if provider == "openai":
@@ -501,7 +818,6 @@ def select_embedding_candidates(
         elif provider == "gemini":
             paper_vecs = embed_texts_gemini(texts, llm_config, embedding_model)
         else:
-            # "free_local" OR "groq" uses local embeddings
             paper_vecs = embed_texts_local(texts)
     except Exception:
         return papers
@@ -527,7 +843,8 @@ def classify_papers_with_llm(
     llm_config: LLMConfig,
     batch_size: int = 15,
 ) -> List[Paper]:
-    if not papers: return papers
+    if not papers:
+        return papers
 
     for batch_start in range(0, len(papers), batch_size):
         batch = papers[batch_start:batch_start + batch_size]
@@ -566,13 +883,15 @@ def classify_papers_with_llm(
             try:
                 idx = int(item["index"])
                 label = str(item.get("focus_label", "")).strip().lower()
-                if label not in ["primary", "secondary", "off-topic"]: label = "off-topic"
+                if label not in ["primary", "secondary", "off-topic"]:
+                    label = "off-topic"
                 idx_to_info[idx] = {
                     "focus_label": label,
                     "relevance_score": float(item.get("relevance_score", 0.0)),
                     "reason": str(item.get("reason", "")).strip(),
                 }
-            except: continue
+            except:
+                continue
 
         for idx, p in enumerate(batch):
             info = idx_to_info.get(idx)
@@ -588,10 +907,12 @@ def classify_papers_with_llm(
 
 
 def heuristic_classify_papers_free(candidates: List[Paper]) -> List[Paper]:
-    if not candidates: return candidates
+    if not candidates:
+        return candidates
     ranked = sorted(candidates, key=lambda p: p.semantic_relevance or 0.0, reverse=True)
     n = len(ranked)
-    if n == 0: return ranked
+    if n == 0:
+        return ranked
     top_k = max(1, min(n, max(10, int(0.3 * n))))
     for idx, p in enumerate(ranked):
         p.llm_relevance_score = p.semantic_relevance or 0.0
@@ -606,7 +927,6 @@ def heuristic_classify_papers_free(candidates: List[Paper]) -> List[Paper]:
 # =========================
 
 def get_s2_citation_stats(title: str, api_key: Optional[str] = None) -> int:
-    """Queries Semantic Scholar to find the max author citations."""
     headers = {"x-api-key": api_key} if api_key else {}
     url = "https://api.semanticscholar.org/graph/v1/paper/search"
     params = {"query": title, "limit": 1, "fields": "title,citationCount,authors.citationCount"}
@@ -618,94 +938,98 @@ def get_s2_citation_stats(title: str, api_key: Optional[str] = None) -> int:
                 paper_data = data['data'][0]
                 auth_cites = [a.get('citationCount', 0) for a in paper_data.get('authors', []) if a.get('citationCount')]
                 return max(auth_cites) if auth_cites else 0
-    except: pass
+    except:
+        pass
     return 0
 
+
 def predict_citations_direct(target_papers: List[Paper], llm_config: LLMConfig, batch_size: int = 8) -> List[Paper]:
-    """MONEYBALL PREDICTOR: Hybrid Author Data + Custom LLM Narrative."""
-    if not target_papers: return target_papers
+    if not target_papers:
+        return target_papers
 
     weights = DEFAULT_MONEYBALL_WEIGHTS
     if os.path.exists("moneyball_weights.json"):
         try:
-            with open("moneyball_weights.json", "r") as f: weights = json.load(f)
-        except: pass
-    
-    s2_key = os.getenv("S2_API_KEY") 
+            with open("moneyball_weights.json", "r") as f:
+                weights = json.load(f)
+        except:
+            pass
+
+    s2_key = os.getenv("S2_API_KEY")
     progress_bar = st.progress(0)
-    
+
     for i, p in enumerate(target_papers):
-        # 1. Get Hard Data (Fame Signal)
         max_auth_cites = get_s2_citation_stats(p.title, s2_key)
         h1_fame = min(math.log(max_auth_cites + 1) * 8, 95)
-        if not s2_key: time.sleep(0.3) 
-        
-        # 2. Calculate Hype/Sniper (Python Heuristics)
+        if not s2_key:
+            time.sleep(0.3)
+
         t_lower = p.title.lower()
         h2_hype = 0
-        if "benchmark" in t_lower or "dataset" in t_lower: h2_hype += 50
-        if "survey" in t_lower: h2_hype += 40
-        if "llm" in t_lower: h2_hype += 10
-        
+        if "benchmark" in t_lower or "dataset" in t_lower:
+            h2_hype += 50
+        if "survey" in t_lower:
+            h2_hype += 40
+        if "llm" in t_lower:
+            h2_hype += 10
+
         h3_sniper = 0
-        if "benchmark" in t_lower: h3_sniper += 50
+        if "benchmark" in t_lower:
+            h3_sniper += 50
         niche = ["lidar", "3d", "audio", "wireless", "agriculture", "traffic", "physics"]
-        if any(n in t_lower for n in niche): h3_sniper -= 20
-        
-        # 3. LLM Call: Get Score AND Custom Narrative
-        # We ask the LLM to write the content bullets specifically
+        if any(n in t_lower for n in niche):
+            h3_sniper -= 20
+
         prompt = textwrap.dedent(f"""
             Analyze this abstract.
             1. Rate 'Citation Potential' (0-10) based on market fit (Broad/Hot = High, Niche = Low).
             2. Write 2 short, plain English sentences explaining the score.
                - Sentence 1 (Market Fit): Why is this topic hot or niche? (Do NOT start with "Market Fit:")
                - Sentence 2 (Contribution): What is the specific value? (Do NOT start with "Contribution:")
-            
+
             Title: {p.title}
             Abstract: {p.abstract[:800]}...
 
             Return JSON: {{ "score": <int>, "bullets": ["string", "string"] }}
         """)
-        
+
         h4_utility = 50.0
         content_bullets = [
             "The topic appears relevant to current research trends.",
             "The paper proposes a specific contribution to the field."
         ]
-        
+
         try:
             raw = call_llm(prompt, llm_config, label="moneyball_narrative")
             if raw:
-                # Cleanup markdown
                 if "```" in raw:
                     parts = raw.split("```json")
-                    if len(parts) > 1: raw = parts[1].split("```")[0]
-                    else: raw = raw.split("```")[1].split("```")[0]
-                
+                    if len(parts) > 1:
+                        raw = parts[1].split("```")[0]
+                    else:
+                        raw = raw.split("```")[1].split("```")[0]
+
                 parsed = json.loads(raw.strip())
                 h4_utility = float(parsed.get("score", 5) * 10)
-                
+
                 if "bullets" in parsed and isinstance(parsed["bullets"], list):
                     raw_list = parsed["bullets"]
-                    # Clean up any "Market Fit:" prefixes the LLM might have ignored
                     cleaned_list = []
                     for b in raw_list:
                         b = b.replace("Market Fit:", "").replace("Contribution:", "").strip()
                         cleaned_list.append(b)
                     content_bullets = cleaned_list[:2]
-        except: pass
+        except:
+            pass
 
-        # 4. Calculate Final Score
-        score = (h1_fame * weights['weight_fame'] + 
-                 h2_hype * weights['weight_hype'] + 
-                 h3_sniper * weights['weight_sniper'] + 
+        score = (h1_fame * weights['weight_fame'] +
+                 h2_hype * weights['weight_hype'] +
+                 h3_sniper * weights['weight_sniper'] +
                  h4_utility * weights['weight_utility'])
         p.predicted_citations = score
 
-        # 5. Construct Final Narrative (3 Bullets)
         final_bullets = []
-        
-        # Bullet 1: Author Context (Data-Driven)
+
         if max_auth_cites > 3000:
             final_bullets.append("🚀 **Distribution:** This work comes from a highly influential author/lab, guaranteeing immediate visibility.")
         elif max_auth_cites > 500:
@@ -714,25 +1038,26 @@ def predict_citations_direct(target_papers: List[Paper], llm_config: LLMConfig, 
             final_bullets.append("📈 **Momentum:** The authors have some prior traction, but the paper will rely on its content to break out.")
         else:
             final_bullets.append("🌱 **Emerging:** These are newer authors, so the paper must rely entirely on its specific merit to gain traction.")
-            
-        # Bullet 2 & 3: Content Context (LLM-Driven)
+
         if len(content_bullets) >= 1:
             final_bullets.append(f"🎯 **Market Fit:** {content_bullets[0]}")
         if len(content_bullets) >= 2:
             final_bullets.append(f"💡 **Contribution:** {content_bullets[1]}")
 
         p.prediction_explanations = final_bullets
-        
+
         progress_bar.progress((i + 1) / len(target_papers))
-        
+
     progress_bar.empty()
     return target_papers
 
 
 def assign_heuristic_citations_free(papers: List[Paper]) -> List[Paper]:
-    if not papers: return papers
+    if not papers:
+        return papers
     scores = [(p.llm_relevance_score or 0.0) * 0.7 + (p.semantic_relevance or 0.0) * 0.3 for p in papers]
-    if not scores: return papers
+    if not scores:
+        return papers
     min_s, max_s = min(scores), max(scores)
     for p, s in zip(papers, scores):
         norm = (s - min_s) / (max_s - min_s) if max_s > min_s else 0.5
@@ -745,7 +1070,7 @@ def summarize_paper_plain_english(paper: Paper, llm_config: LLMConfig) -> str:
     Explain this research paper to a non-expert.
     Title: {paper.title}
     Abstract: {paper.abstract}
-    
+
     Provide 3-6 plain English bullet points covering main idea, problem solved, and takeaways.
     """).strip()
     return call_llm(prompt, llm_config, label="plain_english_summary")
@@ -760,14 +1085,16 @@ PIPELINE_DESCRIPTION_MD = """
 
 You write a short research brief in natural language about the kind of work you care about, and optionally what you are not interested in. If you leave both fields empty, the agent switches to a global mode and just looks for the most impactful recent cs.AI, cs.LG, and cs.HC papers overall.
 
-#### 2. The agent fetches recent arXiv papers
+#### 2. The agent fetches recent arXiv papers + builds a Trends Dashboard
 
-It fetches up to about 5000 papers from arxiv.org in the Artificial Intelligence, Machine Learning, and Human–Computer Interaction categories (`cs.AI`, `cs.LG`, and `cs.HC`) for the date range you choose. It does this carefully, respecting arXiv's API rate limits.
+It fetches up to about 5000 papers from arxiv.org for the date range you choose, using your selected arXiv category filters—either all categories, or a specific main category (like Computer Science, Statistics, Physics) with one or more subcategories (like cs.AI, stat.ML, etc.). It does this carefully, respecting arXiv’s API rate limits.
+
+Then, before you jump into the ranked list, it generates a **Trends Dashboard** from the **abstracts of the top-ranked papers**—showing technical-term word clouds, theme/bucket counts, acronym/model mentions, trend-over-time lines, and co-occurrence patterns.
 
 #### 3. The agent picks candidate papers
 
 - In **targeted mode**, the agent uses embeddings to measure how close each paper's title and abstract are to your brief in meaning and keeps the top 150 as candidates.
-- In **global mode**, it simply takes the most recent 150 `cs.AI`, `cs.LG`, and `cs.HC` papers as candidates.
+- In **global mode**, it simply takes the most recent 150 papers as candidates.
 
 #### The agent filters by venue (Optional)
 
@@ -805,9 +1132,16 @@ def main():
         layout="wide",
     )
 
+    # Light dashboard styling polish
+    st.markdown("""
+    <style>
+      .block-container { padding-top: 1rem; }
+      [data-testid="stMetric"] { background: #fff; padding: 10px; border-radius: 12px; }
+    </style>
+    """, unsafe_allow_html=True)
+
     st.title("🔎 Research Agent")
 
-    
     st.write(
         """Too many important papers get lost in the noise. Most researchers and practitioners cannot reliably scan what is new recently in their area, find truly promising work, and trust that they did not miss something big."""
         " This agent helps with this problem by finding, ranking, and explaining recent AI papers on arxiv.org."
@@ -843,8 +1177,6 @@ def main():
         )
 
         # --- Venue Filtering UI ---
-
-
         st.markdown("### 🏷 Venue Filter")
 
         venue_filter_type = st.selectbox(
@@ -857,14 +1189,11 @@ def main():
         selected_venues = []
 
         if venue_filter_type == "Specific Venue":
-
-            # First dropdown: choose category
             selected_category = st.selectbox(
                 "Select type:",
                 ["Conference", "Journal"]
             )
 
-            # Depending on category show MULTISELECT
             if selected_category == "Conference":
                 options = sorted(CONFERENCE_KEYWORDS)
             else:
@@ -875,12 +1204,39 @@ def main():
                 options=options
             )
 
+        # ---- Category selection UI ----
+        st.markdown("### 🧩 arXiv Category")
+
+        main_cat = st.selectbox(
+            "Main category",
+            ["All"] + list(ARXIV_CATEGORIES.keys()),
+            index=1
+        )
+
+        if main_cat == "All":
+            subcats = []
+            st.caption("Using all available categories.")
+        else:
+            subcats = st.multiselect(
+                "Subcategory (choose one or more)",
+                options=ARXIV_CATEGORIES[main_cat],
+                default=["cs.AI", "cs.LG", "cs.HC"] if main_cat == "Computer Science" else [],
+                help="If you choose none, we’ll use ALL subcategories from the selected main category."
+            )
+
+        arxiv_query = build_arxiv_category_query(main_cat, subcats)
+
         date_option = st.selectbox("Date Range", ["Last 3 Days", "Last Week", "Last Month"])
 
         st.markdown("### ⭐ Top N Highlight")
-        top_n = st.slider(
-            "How many top papers to highlight?",
-            1, 10, 3
+        top_n = st.slider("How many top papers to highlight?", 1, 10, 3)
+
+        # NEW: Dashboard size control
+        st.markdown("### 📊 Trends Dashboard")
+        dashboard_n = st.slider(
+            "How many top-ranked papers to analyze (EDA)?",
+            10, 150, 50, step=10,
+            help="Trends dashboard is built from titles+abstracts of the top-ranked papers."
         )
 
         st.markdown("### 🔌 Provider")
@@ -937,15 +1293,7 @@ def main():
                 openai_models,
                 index=0,
             )
-            if model_choice == "Custom":
-                model_name = st.text_input(
-                    "Custom OpenAI Chat model name",
-                    value="gpt-4.1-mini",
-                    help="Example: gpt-4.1, gpt-4.1-mini, gpt-4o, gpt-4o-mini, o1, etc."
-                )
-            else:
-                model_name = model_choice
-
+            model_name = model_choice
             embedding_model_name = OPENAI_EMBEDDING_MODEL_NAME
             st.caption(f"Embeddings (OpenAI): `{embedding_model_name}`")
 
@@ -957,7 +1305,6 @@ def main():
                 "The key is kept only in memory for this session and is never written to disk."
             )
 
-            # Updated Gemini models list including Gemini 3 Preview
             gemini_models = [
                 "gemini-3-pro-preview",
                 "gemini-3-flash-preview",
@@ -970,15 +1317,7 @@ def main():
                 gemini_models,
                 index=0,
             )
-            if gemini_choice == "Custom":
-                model_name = st.text_input(
-                    "Custom Gemini model name",
-                    value="gemini-3-pro-preview",
-                    help="Use the model identifier shown in Google AI Studio, for example `gemini-3-pro-preview`."
-                )
-            else:
-                model_name = gemini_choice
-
+            model_name = gemini_choice
             embedding_model_name = GEMINI_EMBEDDING_MODEL_NAME
             st.caption(f"Embeddings (Gemini): `{embedding_model_name}`")
 
@@ -1000,15 +1339,7 @@ def main():
                 groq_models,
                 index=0,
             )
-
-            if model_choice == "Custom":
-                model_name = st.text_input(
-                    "Custom Groq Model Name",
-                    value="llama-3.1-70b-versatile",
-                )
-            else:
-                model_name = model_choice
-
+            model_name = model_choice
             embedding_model_name = "sentence-transformers/all-MiniLM-L6-v2"
             st.caption("Using free local MiniLM embeddings (Groq does not provide embeddings).")
 
@@ -1034,7 +1365,6 @@ def main():
     else:
         st.markdown(PIPELINE_DESCRIPTION_MD)
 
-    # Mode and query brief
     brief_text = research_brief.strip()
     not_text = not_looking_for.strip()
 
@@ -1059,11 +1389,13 @@ def main():
         "not_looking_for": not_looking_for.strip(),
         "date_option": date_option,
         "top_n": top_n,
+        "dashboard_n": dashboard_n,
         "model_name": model_name,
         "provider": provider,
         "venue_filter_type": venue_filter_type,
         "selected_category": selected_category,
         "selected_venues": selected_venues,
+        "arxiv_query": arxiv_query,
     }
 
     if "last_params" not in st.session_state:
@@ -1172,46 +1504,44 @@ def main():
             else "FreeLocalHeuristic"
         ),
         "top_n": top_n,
+        "dashboard_n": dashboard_n,
         "min_for_prediction": MIN_FOR_PREDICTION,
+        "arxiv_query": arxiv_query,
     }
     st.session_state["config"] = config
     save_json(os.path.join(project_folder, "config.json"), config)
 
     # 2. Fetch current papers
-    st.subheader("2. Fetch Current Papers from arXiv (cs.AI + cs.LG + cs.HC)")
+    st.subheader("2. Fetch Current Papers from arXiv according to your selected Category and Subcategory")
 
     if run_clicked or "current_papers" not in st.session_state:
-        with st.spinner("Fetching cs.AI, cs.LG, and cs.HC papers from arXiv by date window..."):
+        with st.spinner("Fetching current papers from arXiv by date window..."):
             current_papers = fetch_arxiv_papers_by_date(
                 start_date=current_start,
                 end_date=current_end,
+                arxiv_query=arxiv_query,
             )
         st.session_state["current_papers"] = current_papers
     else:
         current_papers = st.session_state["current_papers"]
 
     if not current_papers:
-        st.warning("No cs.AI, cs.LG, or cs.HC papers found for this date range (or arXiv stopped responding).")
+        st.warning("No papers found for this date range (or arXiv stopped responding).")
         return
 
     st.success(
-        f"Fetched {len(current_papers)} cs.AI, cs.LG, and cs.HC papers in this date range "
+        f"Fetched {len(current_papers)} papers in this date range and Category/Subcategory Selected "
         "(before any candidate selection)."
     )
 
-    # Apply NOT filter provider-agnostically
     # NOT filter
     if not_text:
         current_papers, removed_count = filter_papers_by_not_terms(current_papers, not_text)
         st.info(f"Excluded {removed_count} papers whose title or abstract contained NOT terms.")
 
-    # DO NOT apply venue filter here.
-    # Save the venue settings for later use after embeddings.
     st.session_state["venue_filter_type"] = venue_filter_type
     st.session_state["selected_category"] = selected_category
     st.session_state["selected_venues"] = selected_venues
-
-    # 🔴 DELETED EARLY FILTER: Logic moved to AFTER embeddings to prevent blinding the model.
 
     st.session_state["current_papers"] = current_papers
 
@@ -1262,7 +1592,7 @@ def main():
 
         st.success(f"{len(candidates)} top candidates selected by embedding similarity for further filtering.")
 
-    # Apply venue filtering AFTER embeddings ✨
+    # Apply venue filtering AFTER embeddings
     venue_filter_type = st.session_state.get("venue_filter_type", "None")
     selected_category = st.session_state.get("selected_category", None)
     selected_venues = st.session_state.get("selected_venues", [])
@@ -1278,10 +1608,7 @@ def main():
 
     if venue_filter_type != "None":
         display_sel = ", ".join(selected_venues) if selected_venues else ""
-        if display_sel:
-            name_string = f" → {display_sel}"
-        else:
-            name_string = ""
+        name_string = f" → {display_sel}" if display_sel else ""
 
         st.info(
             f"Venue filter `{venue_filter_type}` applied{name_string}. "
@@ -1319,10 +1646,7 @@ def main():
                         batch_size=15,
                     )
                 st.session_state["candidates"] = candidates
-                
-                # --- Inserted Line ---
                 st.success(f"Classifying candidates as PRIMARY, SECONDARY, or OFF TOPIC ({provider_label})... Done!")
-
         else:
             st.info(
                 "Free local mode: using a simple heuristic based on embedding similarity instead of LLM based classification."
@@ -1472,27 +1796,11 @@ It combines four signals:
 
 This approach statistically outperforms pure LLM "vibes" by 6x.
 """)
-    elif provider == "gemini":
-        st.markdown("""
-**How this step works (Gemini mode)**
-
-For each selected paper, the agent sends the title, authors, and abstract to a Gemini model (for example `gemini-3-pro-preview`) and asks it to assign a 1-year citation impact score. The model bases this score on signals such as how trendy the topic is, how novel and substantial the abstract sounds, how broad the potential audience is, and whether the work appears to come from strong labs or well known authors.
-
-These citation impact scores are heuristic and are best used for ranking within this batch of papers, not as ground truth. They may reflect existing academic and data biases.
-        """)
-    elif provider == "groq":
-        st.markdown("""
-**How this step works (Groq mode)**
-
-For each selected paper, the agent sends the title, authors, and abstract to a model on Groq and asks it to assign a 1-year citation impact score. The model bases this score on signals such as how trendy the topic is, how novel and substantial the abstract sounds, how broad the potential audience is, and whether the work appears to come from strong labs or well known authors.
-
-These citation impact scores are heuristic and are best used for ranking within this batch of papers, not as ground truth.
-        """)
     else:
         st.markdown("""
 **How this step works (free local mode)**
 
-In free local mode, the agent does not call any external LLM. Instead, it combines the embedding based similarity and relevance scores into a single numeric citation impact score and uses that score as a proxy for how influential the paper might be relative to others in this batch. The absolute numbers are less important than the relative ranking.
+In free local mode, the agent does not call any external LLM. Instead, it combines the embedding based similarity and relevance scores into a single numeric citation impact score and uses that score as a proxy for how influential the paper might be relative to others in this batch.
 
 These scores are heuristic and should be used as a guide for exploration rather than as formal evaluation metrics.
         """)
@@ -1508,9 +1816,7 @@ These scores are heuristic and should be used as a guide for exploration rather 
             with st.spinner("Computing heuristic citation impact scores from relevance signals..."):
                 papers_with_pred = assign_heuristic_citations_free(selected_papers)
 
-        papers_with_pred = [
-            p for p in papers_with_pred if p.predicted_citations is not None
-        ]
+        papers_with_pred = [p for p in papers_with_pred if p.predicted_citations is not None]
         if not papers_with_pred:
             st.error("Citation impact scoring did not produce any scores.")
             return
@@ -1522,17 +1828,11 @@ These scores are heuristic and should be used as a guide for exploration rather 
         def sort_by_pred(papers: List[Paper]) -> List[Paper]:
             return sorted(
                 papers,
-                key=lambda p: (
-                    p.predicted_citations if p.predicted_citations is not None else 0,
-                ),
+                key=lambda p: (p.predicted_citations if p.predicted_citations is not None else 0),
                 reverse=True,
             )
 
-        primary_pred_sorted = sort_by_pred(primary_pred)
-        secondary_pred_sorted = sort_by_pred(secondary_pred)
-        others_pred_sorted = sort_by_pred(others_pred)
-
-        ranked_papers = primary_pred_sorted + secondary_pred_sorted + others_pred_sorted
+        ranked_papers = sort_by_pred(primary_pred) + sort_by_pred(secondary_pred) + sort_by_pred(others_pred)
         st.session_state["ranked_papers"] = ranked_papers
         st.session_state["has_run_once"] = True
     else:
@@ -1545,10 +1845,7 @@ These scores are heuristic and should be used as a guide for exploration rather 
 
     # 7. All selected papers ranked
     st.subheader("7. All Selected Papers (Ranked by Citation Impact Score)")
-
-    st.caption(
-        "Primary papers appear first, ranked by citation impact score, followed by secondary papers."
-    )
+    st.caption("Primary papers appear first, ranked by citation impact score, followed by secondary papers.")
 
     table_rows = []
     for rank, p in enumerate(ranked_papers, start=1):
@@ -1571,10 +1868,9 @@ These scores are heuristic and should be used as a guide for exploration rather 
                 "Focus": focus_display,
                 "Relevance score": round(llm_rel, 2),
                 "Embedding similarity": round(emb_rel, 3),
-                "Venue":p.venue or "N/A",
+                "Venue": p.venue or "N/A",
                 "Title": p.title,
                 "arXiv": p.arxiv_url,
-
             }
         )
 
@@ -1583,7 +1879,7 @@ These scores are heuristic and should be used as a guide for exploration rather 
     if not df.empty:
         st.dataframe(
             df,
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
             column_config={
                 "arXiv": st.column_config.LinkColumn(
@@ -1595,6 +1891,17 @@ These scores are heuristic and should be used as a guide for exploration rather 
                 )
             }
         )
+
+    # 7.5 NEW: Trends Dashboard (Abstract-only EDA)
+    dash_n_effective = min(max(int(dashboard_n), 10), len(ranked_papers))
+    dashboard_papers = ranked_papers[:dash_n_effective]
+    render_trends_dashboard(
+        papers_for_dashboard=dashboard_papers,
+        top_k_terms=25,
+        trend_terms=8,
+        max_heat_terms=15,
+    )
+    st.markdown("---")
 
     # 8. Top N highlighted
     top_n_effective = min(top_n, len(ranked_papers))
@@ -1666,6 +1973,7 @@ These scores are heuristic and should be used as a guide for exploration rather 
         f"Provider: {'OpenAI' if provider == 'openai' else 'Gemini' if provider == 'gemini' else 'Groq' if provider == 'groq' else 'Free local heuristic'}",
         f"Chat model: {model_name}",
         f"Embedding model: {embedding_model_name}",
+        f"Dashboard papers analyzed: {dash_n_effective}",
         "",
     ]
     for rank, p in enumerate(topN, start=1):
