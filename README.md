@@ -1,4 +1,4 @@
-# 🔎 Research Agent v5.0
+# 🔎 Research Agent v6.0
 
 A lightweight, intelligent research assistant that fetches, ranks, and explains recent AI papers from arXiv.
 
@@ -10,9 +10,7 @@ It produces ranked tables, citation impact scores, and **"Plain English" summari
 
 ---
 
-## 🚀 What's New
-
-### ⚾ The "Moneyball" Ranking Engine
+## ⚾ The "Moneyball" Ranking Engine
 
 We have completely overhauled how papers are ranked. We stopped asking LLMs to guess "Will this paper be famous?" (which turned out to be unreliable) and built a **Moneyball Algorithm**.
 
@@ -21,102 +19,64 @@ We have completely overhauled how papers are ranked. We stopped asking LLMs to g
 
 **The Result:** A **6x increase in precision@10**, meaning the papers at the top of your list are statistically much more likely to be influential.
 
-### ⚡ Groq Integration (Llama 3.3)
+### Note on New Papers
+
+Papers less than 5 days old often lack citation data in Semantic Scholar. These are marked as **"Too new for impact score"** and ranked purely by their relevance to your query.
+
+---
+
+## ⚡ Groq Integration (Llama 3.3)
 
 You can now use **Groq** as your intelligence provider. This allows you to run high-performance open-source models (like **Llama 3.3 70B**) with blazing fast inference speeds and **free API access**.
 
-> **Note:** In Groq mode, the agent uses local embeddings for search and the Groq LLM for reasoning.
-
-### 🏷️ Smart Venue Filtering
-
-Filter papers by publication venue without losing semantic quality:
-
-- **Filter Types:** "All Conferences", "All Journals", or "Specific Venue"
-- **Specific Selection:** Pick individual top-tier venues like **NeurIPS, CVPR, ICML, Nature, or Science**
-- **Smart Pipeline:** The agent performs semantic search on all papers first to understand the landscape, and then applies your venue filter. This ensures the AI sees the full context of related work before narrowing down.
-
-### 🧭 arXiv Category & Subcategory Filtering
-
-You can now filter arXiv fetches by a main category and one or more subcategories. In the current UI the only available main category is **Computer Science** (papers with `cs.*` tags). Use subcategories such as `cs.AI`, `cs.LG`, and `cs.HC` to narrow the search to specific areas within Computer Science.
-
-### 🛡️ Robust arXiv Fetching
-
-- Improved rate-limiting logic to strictly adhere to arXiv's API policies
-- Prevents IP bans during large data fetches by using smart backoff (3-second delays)
+> **Note:** In Groq mode, the agent uses local embeddings for search (all-MiniLM-L6-v2) and sends only the filtered candidates to Groq for analysis.
 
 ---
 
-## 🔌 Four Intelligence Modes
+## 🎯 Features
 
-You can choose your **"Brain"** from the sidebar:
-
-### 1. OpenAI Mode (Best Quality)
-
-- **Requires:** OpenAI API Key
-- **Models:** GPT-5.2, GPT-5, GPT-5-mini, GPT-5-nano, GPT-4o, GPT-4.1, GPT-4.1-mini, GPT-4.0-mini, GPT-o1
-- **Best For:** Highest quality reasoning, summaries, and narrative analysis. Uses OpenAI embeddings for search.
-
-### 2. Gemini Mode (Best Context/Price)
-
-- **Requires:** Google Gemini API Key
-- **Models:** Gemini 3 Pro (Preview), Gemini 2.5 Flash, Gemini 2.5 Pro, Gemini 2.0 Flash
-- **Best For:** Processing large batches of papers quickly. Uses Gemini embeddings.
-
-### 3. Groq Mode (Fastest / Open Source)
-
-- **Requires:** Groq API Key (Currently Free)
-- **Models:** Llama 3.3 70B, Llama 3.1 8B
-- **Best For:** Fast speed and using open-weight models.
-- **Architecture:** Uses Local Embeddings (MiniLM) for search + Groq for classification/scoring.
-
-### 4. Free Local Mode (Offline / Privacy)
-
-- **Requires:** No API Key. Runs on CPU.
-- **Models:** SentenceTransformers (MiniLM-L6-v2) + Heuristics
-- **Best For:** Offline use, zero cost, and quick browsing without LLM summaries.
+- **Semantic Search:** Finds papers conceptually related to your query, not just keyword matches.
+- **Plain English Summaries:** Translates academic jargon into clear bullet points.
+- **"Moneyball" Impact Scores:** Predicts 1-year citation impact using real author data.
+- **Multi-Provider Support:** OpenAI, Gemini, Groq, or Local (No API Key).
+- **Export to ZIP:** Download all data (JSONs, Markdown report) for offline use.
 
 ---
 
-## 🧠 How It Works (The Pipeline)
+## 🗂️ Categories Supported
 
-The agent follows a **9-step pipeline** to distill hundreds of papers into the top 3:
+We capture all major Computer Science subcategories. You can select specific ones to narrow your search:
 
-1. **Briefing:** You provide a natural language "Research Brief" (e.g., "Agents that use tool use") and optional constraints.
-
-2. **Fetching:** It downloads recent metadata from **cs.AI, cs.LG, and cs.HC** via the arXiv API.
-
-3. **Semantic Search:**
-   - **OpenAI/Gemini:** Uses cloud embeddings to find papers semantically similar to your brief.
-   - **Groq/Local:** Uses local sentence-transformers (MiniLM) on your CPU to find relevant papers.
-
-4. **Venue Filtering:** Filters candidates (e.g., "NeurIPS only") after the semantic search.
-
-5. **LLM Classification:** The chosen LLM reads the abstracts and classifies papers as **Primary** (direct match), **Secondary** (partial match), or **Off-topic**.
-
-6. **Scoring Set:** It builds a final list of ~20 papers to score, prioritizing Primary matches.
-
-7. **Moneyball Scoring:** Instead of asking the LLM to guess citations, the agent fetches live Semantic Scholar data (**Author Momentum, Citation Velocity**) and combines it with an LLM analysis of **"Market Fit"** and **"Novelty"** to calculate a weighted Impact Score.
-
-8. **Ranking:** Papers are ranked by this hybrid score.
-
-9. **Reporting:** The UI displays metadata, PDF links, and generates a **Narrative Analysis** that explains why the paper is influential (e.g. "Backed by a powerhouse lab").
+- Artificial Intelligence (cs.AI)
+- Machine Learning (cs.LG)
+- Human-Computer Interaction (cs.HC)
+- Computation and Language (cs.CL)
+- Computer Vision (cs.CV)
+- Robotics (cs.RO)
+- Information Retrieval (cs.IR)
+- Neural and Evolutionary Computing (cs.NE)
+- Software Engineering (cs.SE)
+- Cryptography and Security (cs.CR)
+- Data Structures and Algorithms (cs.DS)
+- Databases (cs.DB)
+- Social and Information Networks (cs.SI)
+- Multimedia (cs.MM)
+- Information Theory (cs.IT)
+- Performance (cs.PF)
+- Multiagent Systems (cs.MA)
 
 ---
 
-## 💻 Usage Guide
+## 📦 Installation (Local)
 
-### Run Locally
-
-This is a pure Python application. No Docker or complex databases required.
-
-#### 1. Clone the repository:
+### 1. Clone the repository:
 
 ```bash
 git clone https://github.com/nurtekinsavasai/arxiv-ai-agent-v2.git
 cd arxiv-ai-agent-v2
 ```
 
-#### 2. Create a virtual environment:
+### 2. Create a virtual environment:
 
 ```bash
 python3 -m venv .venv
@@ -124,7 +84,7 @@ source .venv/bin/activate
 # Windows: .venv\Scripts\activate
 ```
 
-#### 3. Install dependencies:
+### 3. Install dependencies:
 
 ```bash
 pip install -r requirements.txt
@@ -132,7 +92,7 @@ pip install -r requirements.txt
 pip install groq
 ```
 
-#### 4. Run the app:
+### 4. Run the app:
 
 ```bash
 streamlit run app.py
@@ -156,7 +116,7 @@ Your browser will open automatically at `http://localhost:8501`.
 
 | Option | Requirements | Best For |
 |--------|-------------|----------|
-| **OpenAI** | API Key | Highest quality summaries and narrative analysis. (GPT-4o, GPT-4.1) |
-| **Gemini** | API Key (Google AI Studio) | Speed and large context windows. (Gemini 3 Pro, Flash 2.5) |
-| **Groq** | API Key (Free) | Fastest inference with open-source models. (Llama 3.1, Mixtral) |
-| **Free Local** | CPU | Privacy, offline use, and zero cost |
+| **OpenAI** | API Key | Highest quality summaries and narrative analysis. (GPT-5.2, etc.) |
+| **Gemini** | API Key (Google AI Studio) | Speed and large context windows. (Gemini 3 Pro, etc.) |
+| **Groq** | API Key (Free) | Blazing fast open-source models (Llama 3.3). |
+| **Free Local** | None | Offline usage, zero cost. Uses heuristics instead of LLM analysis. |
